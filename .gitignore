@@ -18,11 +18,11 @@ env/
 Thumbs.db
 
 # Project data and generated artifacts
-data/
-outputs/
-tmp/
-runs/
-wandb/
+/data/
+/outputs/
+/tmp/
+/runs/
+/wandb/
 
 # Model weights and experiment checkpoints
 *.pt

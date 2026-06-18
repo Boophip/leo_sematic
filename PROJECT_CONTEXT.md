@@ -214,11 +214,15 @@ Backbone Stage 4 -> Exit 4
 建议压缩等级：
 
 ```text
-Beta 0: 无损或近无损
-Beta 1: 高质量压缩
-Beta 2: 中等质量压缩与适度缩放
-Beta 3: 强压缩与强缩放
+Local: 本地处理不进行通信压缩，通信字节数、编码时延和解码时延均记为 0
+Beta 0: PNG 无损压缩，保持原始 ROI crop 尺寸
+Beta 1: JPEG 高质量压缩，quality=90，保持原始 ROI crop 尺寸
+Beta 2: JPEG 中等质量压缩，quality=70，缩放至 0.75x，短边至少保留 16 px
+Beta 3: JPEG 强压缩，quality=45，缩放至 0.50x，短边至少保留 8 px
 ```
+
+上述 `Beta 0..3` 是离线 Profiling 的首版可复现实验设置，属于工程实现与实验设置，
+不改变论文公式。压缩只作用于跨星卸载动作；本地处理固定使用 Local 策略。
 
 Profiling 阶段遍历：
 
