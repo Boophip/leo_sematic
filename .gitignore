@@ -1,0 +1,38 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Project data and generated artifacts
+data/
+outputs/
+tmp/
+runs/
+wandb/
+
+# Model weights and experiment checkpoints
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
