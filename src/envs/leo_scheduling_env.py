@@ -35,6 +35,7 @@ from src.simulation.episode import (
     SchedulingAction,
     SimulationConfig,
     SlotSummary,
+    build_slot_summary,
     summarize_decisions,
 )
 from src.simulation.link import (
@@ -152,6 +153,7 @@ class LeoSchedulingEnv(gym.Env):
         self._terminated = False
         self._slot_total_value: dict[int, float] = {}
         self._slot_success_value: dict[int, float] = {}
+        self.training_reward_total = 0.0
         self.decisions: list[DecisionResult] = []
         self.slots: list[SlotSummary] = []
 
@@ -176,6 +178,7 @@ class LeoSchedulingEnv(gym.Env):
         self._terminated = False
         self._slot_total_value = {}
         self._slot_success_value = {}
+        self.training_reward_total = 0.0
         self.decisions = []
         self.slots = []
         return self._observation(), {"roi_id": self._current_roi_id()}
@@ -209,17 +212,23 @@ class LeoSchedulingEnv(gym.Env):
         self.current_index += 1
         slot_ended = self._slot_completed(slot_index)
         aosi_cost = 0.0
+        canonical_slot_reward = 0.0
         if slot_ended:
-            aosi_cost = self._finish_slot(slot_index)
-            reward -= self.config.aosi_weight * _safe_div(aosi_cost, self.config.aosi_ref)
+            slot_summary = self._finish_slot(slot_index)
+            aosi_cost = slot_summary.aosi_cost
+            canonical_slot_reward = slot_summary.reward
+            reward += canonical_slot_reward
 
         self._terminated = self.current_index >= len(self.profiles.roi_order)
+        self.training_reward_total += reward
         info = decision.as_row()
         info.update(
             {
                 "reward": reward,
                 "slot_ended": slot_ended,
                 "aosi_cost": aosi_cost,
+                "canonical_slot_reward": canonical_slot_reward,
+                "training_reward_total": self.training_reward_total,
                 "action_index": action_index,
                 "action_label": spec.label,
             }
@@ -394,7 +403,7 @@ class LeoSchedulingEnv(gym.Env):
             reward -= self.config.quality_penalty
         return reward
 
-    def _finish_slot(self, slot_index: int) -> float:
+    def _finish_slot(self, slot_index: int) -> SlotSummary:
         for name, state in self.node_states.items():
             state.queue_cycles = evolve_compute_queue(
                 queue_cycles=state.queue_cycles,
@@ -416,10 +425,11 @@ class LeoSchedulingEnv(gym.Env):
             for row in self.decisions
             if row.slot_index == slot_index
         ]
-        self.slots.append(self._slot_summary(slot_index, slot_decisions, aosi_cost))
+        slot_summary = self._slot_summary(slot_index, slot_decisions, aosi_cost)
+        self.slots.append(slot_summary)
         self._slot_total_value = {}
         self._slot_success_value = {}
-        return aosi_cost
+        return slot_summary
 
     def _update_aosi(self, current_values: Mapping[int, float]) -> float:
         total_cost = 0.0
@@ -445,19 +455,12 @@ class LeoSchedulingEnv(gym.Env):
         decisions: Sequence[DecisionResult],
         aosi_cost: float,
     ) -> SlotSummary:
-        reward = sum(self._decision_reward(row) for row in decisions)
-        reward -= self.config.aosi_weight * _safe_div(aosi_cost, self.config.aosi_ref)
-        processed = [row for row in decisions if row.action_kind != DROP_ACTION and not row.illegal]
-        return SlotSummary(
-            policy="Proposed-RL",
-            slot_index=slot_index,
-            roi_count=len(decisions),
-            reward=reward,
+        return build_slot_summary(
+            "Proposed-RL",
+            slot_index,
+            decisions,
             aosi_cost=aosi_cost,
-            semantic_value_sum=sum(row.semantic_value for row in decisions),
-            semantic_quality_sum=sum(row.semantic_value * row.predicted_quality for row in processed),
-            total_delay_ms=sum(row.total_delay_ms for row in processed),
-            total_energy_j=sum(row.total_energy_j for row in processed),
+            config=self.config,
         )
 
     def _observation(self) -> np.ndarray:

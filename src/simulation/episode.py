@@ -842,7 +842,7 @@ def run_policy_episode(
             grid_id: current_values.get(grid_id, 0.0)
             for grid_id in set(previous_grid_values) | set(current_values)
         }
-        slot_summary = _slot_summary(
+        slot_summary = build_slot_summary(
             policy.name,
             slot_index,
             slot_decisions,
@@ -1114,7 +1114,7 @@ def _update_aosi(
     return total_cost
 
 
-def _slot_summary(
+def build_slot_summary(
     policy_name: str,
     slot_index: int,
     decisions: Sequence[DecisionResult],
@@ -1122,7 +1122,7 @@ def _slot_summary(
     aosi_cost: float,
     config: SimulationConfig,
 ) -> SlotSummary:
-    """Build the deterministic QoE-like reward from quality, delay, energy, and AoSI."""
+    """Build the canonical slot QoE from quality, delay, energy, and AoSI."""
 
     processed = [row for row in decisions if row.action_kind != DROP_ACTION and not row.illegal]
     semantic_value_sum = sum(row.semantic_value for row in decisions)

@@ -7,7 +7,7 @@ import json
 import shutil
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -71,6 +71,9 @@ class PpoSmokeSettings:
     total_timesteps: int
     seed: int
     scenario: str
+    all_scenarios: bool
+    eval_only: bool
+    model_path: Path | None
     exist_ok: bool
     bandwidth_hz: float
     base_config: SimulationConfig
@@ -87,6 +90,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-rois", type=int, default=512)
     parser.add_argument("--total-timesteps", type=int, default=5000)
     parser.add_argument("--scenario", choices=SCENARIO_NAMES)
+    parser.add_argument("--all-scenarios", action="store_true")
+    parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--model-path", type=Path)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--rois-per-slot", type=int)
     parser.add_argument("--deadline-ms", type=float)
@@ -162,6 +168,9 @@ def _resolve_settings(args: argparse.Namespace) -> PpoSmokeSettings:
         total_timesteps=total_timesteps,
         seed=seed,
         scenario=scenario,
+        all_scenarios=bool(args.all_scenarios),
+        eval_only=bool(args.eval_only),
+        model_path=_resolve_path(args.model_path) if args.model_path is not None else None,
         exist_ok=bool(args.exist_ok),
         bandwidth_hz=float(link.get("bandwidth_hz", DEFAULT_LINK_BANDWIDTH_HZ)),
         base_config=base_config,
@@ -214,6 +223,10 @@ def _validate_settings(settings: PpoSmokeSettings) -> None:
         raise FileNotFoundError(f"profile CSV not found: {settings.profile_csv}")
     if not settings.quality_proxy.is_file():
         raise FileNotFoundError(f"quality proxy not found: {settings.quality_proxy}")
+    if settings.eval_only:
+        model_path = settings.model_path or settings.output_dir / "model.zip"
+        if not model_path.is_file():
+            raise FileNotFoundError(f"PPO model not found for --eval-only: {model_path}")
     if settings.base_config.rois_per_slot <= 0:
         raise ValueError("rois_per_slot must be positive")
 
@@ -260,9 +273,10 @@ def _make_env(
     settings: PpoSmokeSettings,
     *,
     slot_count: int,
+    scenario_name: str | None = None,
 ) -> LeoSchedulingEnv:
     bundle = build_scenario(
-        settings.scenario,
+        scenario_name or settings.scenario,
         base_config=settings.base_config,
         node_configs=settings.node_configs,
         slot_count=slot_count,
@@ -274,6 +288,34 @@ def _make_env(
         node_configs=bundle.node_configs,
         link_trace=bundle.link_trace,
     )
+
+
+def _train_or_load_model(
+    profiles: ActionProfileTable,
+    settings: PpoSmokeSettings,
+    *,
+    slot_count: int,
+    scenario_name: str,
+) -> tuple[PPO, float, Mapping[str, object], Path]:
+    hyperparameters = _ppo_hyperparameters(settings.total_timesteps)
+    env = _make_env(profiles, settings, slot_count=slot_count, scenario_name=scenario_name)
+    if settings.eval_only:
+        model_path = settings.model_path or settings.output_dir / "model.zip"
+        model = PPO.load(model_path, env=env, device="cpu")
+        return model, 0.0, hyperparameters, model_path
+
+    model = PPO(
+        "MlpPolicy",
+        env,
+        seed=settings.seed,
+        verbose=0,
+        **hyperparameters,
+    )
+    started = time.perf_counter()
+    model.learn(total_timesteps=settings.total_timesteps)
+    train_seconds = time.perf_counter() - started
+    model.save(settings.output_dir / "model")
+    return model, train_seconds, hyperparameters, settings.output_dir / "model.zip"
 
 
 def _evaluate_ppo(model: PPO, env: LeoSchedulingEnv) -> PolicyRunResult:
@@ -294,6 +336,7 @@ def _write_outputs(
     ppo_result: PolicyRunResult,
     baseline_results: Sequence[PolicyRunResult],
     hyperparameters: Mapping[str, object],
+    scenario_name: str,
 ) -> dict[str, object]:
     all_results = [ppo_result, *baseline_results]
     metrics_rows = [result.metrics for result in all_results]
@@ -317,7 +360,8 @@ def _write_outputs(
         "configuration": {
             "limit_rois": settings.limit_rois,
             "total_timesteps": settings.total_timesteps,
-            "scenario": settings.scenario,
+            "scenario": scenario_name,
+            "eval_only": settings.eval_only,
             "seed": settings.seed,
             "rois_per_slot": settings.base_config.rois_per_slot,
             "deadline_ms": settings.base_config.deadline_ms,
@@ -327,6 +371,7 @@ def _write_outputs(
             "ppo_hyperparameters": dict(hyperparameters),
         },
         "runtime_seconds": train_seconds,
+        "training_reward_total": ppo_result.metrics.get("training_reward_total", 0.0),
         "policy_metrics": metrics_rows,
         "outputs": {
             "model": str(model_path.resolve()),
@@ -344,6 +389,47 @@ def _write_outputs(
     return summary
 
 
+def _write_all_scenarios_outputs(
+    output_dir: Path,
+    summaries: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    flattened_rows: list[dict[str, object]] = []
+    for summary in summaries:
+        scenario_name = str(summary["configuration"]["scenario"])
+        for row in summary["policy_metrics"]:
+            item = dict(row)
+            item["scenario"] = scenario_name
+            flattened_rows.append(item)
+
+    pd.DataFrame(flattened_rows).to_csv(output_dir / "comparison_metrics_all.csv", index=False)
+    report_path = output_dir / "comparison_report.md"
+    lines = [
+        "# PPO Smoke Multi-Scenario Comparison",
+        "",
+        "All rows use the canonical slot QoE metric; PPO training reward is reported separately in each scenario summary.",
+        "",
+        _markdown_table(flattened_rows, include_scenario=True),
+        "",
+    ]
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    aggregate = {
+        "purpose": "PPO smoke multi-scenario summary; not a formal paper result.",
+        "output_dir": str(output_dir.resolve()),
+        "scenarios": list(summaries),
+        "policy_metrics": flattened_rows,
+        "outputs": {
+            "comparison_metrics_all": str((output_dir / "comparison_metrics_all.csv").resolve()),
+            "comparison_report": str(report_path.resolve()),
+            "summary_all": str((output_dir / "summary_all.json").resolve()),
+        },
+    }
+    (output_dir / "summary_all.json").write_text(
+        json.dumps(aggregate, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return aggregate
+
+
 def _write_comparison_report(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     lines = [
         "# PPO Smoke Scheduling Comparison",
@@ -356,18 +442,19 @@ def _write_comparison_report(path: Path, rows: Sequence[Mapping[str, object]]) -
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _markdown_table(rows: Sequence[Mapping[str, object]]) -> str:
-    header = "| " + " | ".join(label for _, label in REPORT_COLUMNS) + " |"
-    separator = "| " + " | ".join("---" for _ in REPORT_COLUMNS) + " |"
+def _markdown_table(rows: Sequence[Mapping[str, object]], *, include_scenario: bool = False) -> str:
+    columns = (("scenario", "Scenario"),) + REPORT_COLUMNS if include_scenario else REPORT_COLUMNS
+    header = "| " + " | ".join(label for _, label in columns) + " |"
+    separator = "| " + " | ".join("---" for _ in columns) + " |"
     body = [
-        "| " + " | ".join(_format_report_value(key, row.get(key, "")) for key, _ in REPORT_COLUMNS) + " |"
+        "| " + " | ".join(_format_report_value(key, row.get(key, "")) for key, _ in columns) + " |"
         for row in rows
     ]
     return "\n".join([header, separator, *body])
 
 
 def _format_report_value(key: str, value: object) -> str:
-    if key == "policy":
+    if key in {"policy", "scenario"}:
         return str(value)
     if key == "total_compressed_bytes":
         return str(int(float(value)))
@@ -378,13 +465,19 @@ def main() -> int:
     args = parse_args()
     settings = _resolve_settings(args)
     _validate_settings(settings)
-    _prepare_output_dir(settings.output_dir, exist_ok=settings.exist_ok)
+    if not settings.eval_only:
+        _prepare_output_dir(settings.output_dir, exist_ok=settings.exist_ok)
+    else:
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(
-        "Estimated PPO smoke runtime before training: "
-        f"{_runtime_estimate(settings.total_timesteps, settings.limit_rois)} "
-        f"for {settings.total_timesteps} timesteps and {settings.limit_rois} ROI."
-    )
+    if settings.eval_only:
+        print("PPO eval-only run: no training will be performed.")
+    else:
+        print(
+            "Estimated PPO smoke runtime before training: "
+            f"{_runtime_estimate(settings.total_timesteps, settings.limit_rois)} "
+            f"for {settings.total_timesteps} timesteps and {settings.limit_rois} ROI."
+        )
     profiles = ActionProfileTable.from_csv(
         settings.profile_csv,
         quality_proxy_path=settings.quality_proxy,
@@ -393,45 +486,56 @@ def main() -> int:
     slot_count = (len(profiles.roi_order) + settings.base_config.rois_per_slot - 1) // (
         settings.base_config.rois_per_slot
     )
-    env = _make_env(profiles, settings, slot_count=slot_count)
-    hyperparameters = _ppo_hyperparameters(settings.total_timesteps)
-    model = PPO(
-        "MlpPolicy",
-        env,
-        seed=settings.seed,
-        verbose=0,
-        **hyperparameters,
-    )
-    started = time.perf_counter()
-    model.learn(total_timesteps=settings.total_timesteps)
-    train_seconds = time.perf_counter() - started
-    model.save(settings.output_dir / "model")
-    model_path = settings.output_dir / "model.zip"
+    scenario_names = SCENARIO_NAMES if settings.all_scenarios else (settings.scenario,)
+    summaries: list[dict[str, object]] = []
+    for scenario_name in scenario_names:
+        scenario_output_dir = settings.output_dir / scenario_name if settings.all_scenarios else settings.output_dir
+        scenario_output_dir.mkdir(parents=True, exist_ok=True)
+        scenario_settings = replace(settings, output_dir=scenario_output_dir, scenario=scenario_name)
+        model, train_seconds, hyperparameters, model_path = _train_or_load_model(
+            profiles,
+            scenario_settings,
+            slot_count=slot_count,
+            scenario_name=scenario_name,
+        )
+        eval_env = _make_env(
+            profiles,
+            scenario_settings,
+            slot_count=slot_count,
+            scenario_name=scenario_name,
+        )
+        ppo_result = _evaluate_ppo(model, eval_env)
+        ppo_result.metrics["training_reward_total"] = eval_env.training_reward_total
+        bundle = build_scenario(
+            scenario_name,
+            base_config=scenario_settings.base_config,
+            node_configs=scenario_settings.node_configs,
+            slot_count=slot_count,
+            bandwidth_hz=scenario_settings.bandwidth_hz,
+        )
+        baseline_results = run_baseline_suite(
+            profiles,
+            config=bundle.config,
+            node_configs=bundle.node_configs,
+            policies=_select_policies(scenario_settings.policy_names, seed=scenario_settings.seed),
+            link_trace=bundle.link_trace,
+        )
+        summaries.append(
+            _write_outputs(
+                scenario_settings,
+                train_seconds=train_seconds,
+                model_path=model_path,
+                ppo_result=ppo_result,
+                baseline_results=baseline_results,
+                hyperparameters=hyperparameters,
+                scenario_name=scenario_name,
+            )
+        )
 
-    eval_env = _make_env(profiles, settings, slot_count=slot_count)
-    ppo_result = _evaluate_ppo(model, eval_env)
-    bundle = build_scenario(
-        settings.scenario,
-        base_config=settings.base_config,
-        node_configs=settings.node_configs,
-        slot_count=slot_count,
-        bandwidth_hz=settings.bandwidth_hz,
-    )
-    baseline_results = run_baseline_suite(
-        profiles,
-        config=bundle.config,
-        node_configs=bundle.node_configs,
-        policies=_select_policies(settings.policy_names, seed=settings.seed),
-        link_trace=bundle.link_trace,
-    )
-    summary = _write_outputs(
-        settings,
-        train_seconds=train_seconds,
-        model_path=model_path,
-        ppo_result=ppo_result,
-        baseline_results=baseline_results,
-        hyperparameters=hyperparameters,
-    )
+    if settings.all_scenarios:
+        summary = _write_all_scenarios_outputs(settings.output_dir, summaries)
+    else:
+        summary = summaries[0]
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
 

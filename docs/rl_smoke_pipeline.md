@@ -12,10 +12,10 @@ simulation, offline profiling rows, and saved quality proxy in a Gymnasium
 interface. The environment does not run detector, multi-exit, or compression
 models online.
 
-`scripts/17_train_ppo_smoke.py` is the executable smoke-training entry point.
-It reads `configs/satellite_env.yaml`, trains PPO, evaluates the learned policy,
-and compares it with the deterministic baselines on the same ROI stream and
-synthetic link trace.
+`scripts/17_train_ppo_smoke.py` is the executable smoke-training and evaluation
+entry point. It reads `configs/satellite_env.yaml`, trains or loads PPO,
+evaluates the learned policy, and compares it with the deterministic baselines
+on the same ROI stream and synthetic link trace.
 
 ## Entry Point
 
@@ -29,6 +29,18 @@ Default smoke run:
 
 ```powershell
 F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --exist-ok
+```
+
+All deterministic stress scenarios:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 128 --all-scenarios --exist-ok
+```
+
+Reuse an existing checkpoint without training:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --eval-only --model-path outputs\rl\ppo_smoke\model.zip --exist-ok
 ```
 
 Before training starts, the script prints a runtime estimate. The default
@@ -56,6 +68,19 @@ outputs/rl/ppo_smoke/eval_metrics.json
 outputs/rl/ppo_smoke/comparison_metrics.csv
 outputs/rl/ppo_smoke/comparison_report.md
 ```
+
+With `--all-scenarios`, each scenario writes the same files under its own
+subdirectory, and the root output directory also writes:
+
+```text
+outputs/rl/ppo_smoke/comparison_metrics_all.csv
+outputs/rl/ppo_smoke/summary_all.json
+```
+
+`training_reward_total` is the PPO learning signal accumulated by the Gym
+environment. `qoe_total` in reports is the canonical slot-level QoE shared with
+the deterministic baseline evaluator, so it is the value to use for policy
+comparison.
 
 The comparison report includes `Proposed-RL` plus:
 

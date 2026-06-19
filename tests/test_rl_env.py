@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 
 from src.envs import LeoSchedulingEnv, build_fixed_action_space
-from src.simulation.episode import ActionProfileTable, SatelliteNodeConfig, SimulationConfig
+from src.simulation.episode import (
+    ActionProfileTable,
+    SatelliteNodeConfig,
+    SimulationConfig,
+    build_slot_summary,
+)
 from src.simulation.link import LinkState
 
 
@@ -161,6 +166,49 @@ class LeoSchedulingEnvTests(unittest.TestCase):
         self.assertEqual(len(env.slots), 1)
         self.assertIn(3, env.grid_ages)
         self.assertGreater(env.node_states["source"].queue_cycles, 0.0)
+
+    def test_slot_summary_uses_canonical_qoe_builder(self) -> None:
+        env = _env(rois_per_slot=2)
+        env.reset()
+        env.step(env.action_index(kind="local", exit_level=2, compression_level="local"))
+        _, _, terminated, _, info = env.step(
+            env.action_index(kind="local", exit_level=2, compression_level="local")
+        )
+
+        self.assertTrue(terminated)
+        self.assertTrue(info["slot_ended"])
+        expected = build_slot_summary(
+            "Proposed-RL",
+            0,
+            env.decisions,
+            aosi_cost=env.slots[0].aosi_cost,
+            config=env.config,
+        )
+        self.assertAlmostEqual(env.slots[0].reward, expected.reward)
+        self.assertAlmostEqual(env.metrics()["qoe_total"], expected.reward)
+
+    def test_training_reward_is_separate_from_reported_qoe(self) -> None:
+        env = _env(rois_per_slot=2)
+        env.reset()
+        env.step(env.action_index(kind="local", exit_level=2, compression_level="local"))
+        env.step(env.action_index(kind="local", exit_level=2, compression_level="local"))
+
+        self.assertNotAlmostEqual(env.training_reward_total, env.metrics()["qoe_total"])
+
+    def test_canonical_qoe_applies_constraint_penalties(self) -> None:
+        env = _env(visible=False, rois_per_slot=1)
+        env.reset()
+        _, _, _, _, info = env.step(
+            env.action_index(
+                kind="offload",
+                target_node="sat_1",
+                exit_level=2,
+                compression_level="beta_1",
+            )
+        )
+
+        self.assertTrue(info["illegal"])
+        self.assertLessEqual(env.metrics()["qoe_total"], -env.config.illegal_penalty)
 
     def test_observation_feature_names_exclude_leakage_fields(self) -> None:
         env = _env()
