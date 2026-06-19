@@ -1,2 +1,43 @@
-"""Deterministic satellite simulation primitives."""
+"""Deterministic satellite simulation primitives and stage-three episodes."""
 
+from src.simulation.episode import (
+    ActionProfileTable,
+    AosiGreedyPolicy,
+    BestSnrPolicy,
+    LocalAdaptivePolicy,
+    LocalDeepPolicy,
+    NoAosiGreedyPolicy,
+    RandomLegalPolicy,
+    SatelliteNodeConfig,
+    ScenarioBundle,
+    SchedulingAction,
+    SemanticGreedyPolicy,
+    SimulationConfig,
+    build_scenario,
+    default_node_configs,
+    default_policies,
+    generate_deterministic_link_trace,
+    run_baseline_suite,
+    run_policy_episode,
+)
+
+__all__ = [
+    "ActionProfileTable",
+    "AosiGreedyPolicy",
+    "BestSnrPolicy",
+    "LocalAdaptivePolicy",
+    "LocalDeepPolicy",
+    "NoAosiGreedyPolicy",
+    "RandomLegalPolicy",
+    "SatelliteNodeConfig",
+    "ScenarioBundle",
+    "SchedulingAction",
+    "SemanticGreedyPolicy",
+    "SimulationConfig",
+    "build_scenario",
+    "default_node_configs",
+    "default_policies",
+    "generate_deterministic_link_trace",
+    "run_baseline_suite",
+    "run_policy_episode",
+]

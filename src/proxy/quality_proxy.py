@@ -20,6 +20,8 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 TARGET_FIELD = "task_quality"
 
+# Keep this list restricted to values that are available online or available
+# from offline cost tables. Do not add supervision-only diagnostics here.
 CATEGORICAL_FEATURES = (
     "predicted_class",
     "compression_level",
@@ -63,6 +65,8 @@ class SplitResult:
 
 @dataclass
 class QualityProxyModel:
+    """Saved sklearn pipeline plus the feature policy needed for safe inference."""
+
     pipeline: Pipeline
     feature_columns: tuple[str, ...]
     categorical_features: tuple[str, ...]
@@ -71,6 +75,8 @@ class QualityProxyModel:
     target_field: str
 
     def predict_quality(self, records: Iterable[Mapping[str, object]] | pd.DataFrame) -> np.ndarray:
+        """Predict clipped task quality for candidate scheduling actions."""
+
         frame = records_to_frame(records)
         predictions = self.pipeline.predict(frame[list(self.feature_columns)])
         return np.clip(predictions, 0.0, 1.0)
@@ -90,6 +96,8 @@ def load_profile_csv(path: Path) -> pd.DataFrame:
 
 
 def validate_feature_policy() -> None:
+    """Guard against accidentally training on labels or model-output diagnostics."""
+
     overlap = sorted(set(FEATURE_COLUMNS) & set(LEAKAGE_FIELDS))
     if overlap:
         raise ValueError(f"feature columns contain leakage fields: {overlap}")
@@ -120,11 +128,15 @@ def split_profile_frame(
     test_size: float = 0.25,
     seed: int = 42,
 ) -> SplitResult:
+    """Split by original image when possible to avoid ROI-level data leakage."""
+
     if not 0 < test_size < 1:
         raise ValueError("test_size must be in (0, 1)")
     validate_profile_frame(frame)
     image_count = frame["image_id"].nunique()
     if image_count >= 2:
+        # Grouping by image_id preserves the project rule that one original
+        # image cannot appear in both proxy training and proxy testing.
         splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
         train_indices, test_indices = next(
             splitter.split(frame, frame[TARGET_FIELD], groups=frame["image_id"])
@@ -133,6 +145,8 @@ def split_profile_frame(
         test = frame.iloc[test_indices].reset_index(drop=True)
         strategy = "group_shuffle_split"
     else:
+        # Tiny smoke fixtures often contain a single image, so they cannot
+        # satisfy image-level isolation; mark that case explicitly in summary.
         n_test = max(1, int(round(len(frame) * test_size)))
         n_test = min(n_test, len(frame) - 1)
         train = frame.iloc[:-n_test].reset_index(drop=True)
@@ -157,6 +171,8 @@ def build_quality_proxy_pipeline(
     max_iter: int = 500,
     seed: int = 42,
 ) -> Pipeline:
+    """Build the compact tabular MLP used by online scheduling simulation."""
+
     transformer = ColumnTransformer(
         transformers=[
             ("numeric", StandardScaler(), list(NUMERIC_FEATURES)),
@@ -207,6 +223,8 @@ def grouped_error_summary(frame: pd.DataFrame, predictions: np.ndarray) -> dict[
 
 
 def save_quality_proxy(path: Path, model: QualityProxyModel) -> None:
+    """Persist both weights and the feature contract for reproducible inference."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
         {
@@ -222,6 +240,8 @@ def save_quality_proxy(path: Path, model: QualityProxyModel) -> None:
 
 
 def load_quality_proxy(path: Path) -> QualityProxyModel:
+    """Load the saved proxy and its feature contract."""
+
     payload = joblib.load(path)
     return QualityProxyModel(
         pipeline=payload["pipeline"],
@@ -242,6 +262,8 @@ def train_quality_proxy_smoke(
     max_iter: int = 500,
     hidden_layer_sizes: Sequence[int] = (32, 16),
 ) -> dict[str, object]:
+    """Train the proxy and write metrics plus grouped error diagnostics."""
+
     frame = load_profile_csv(profile_csv)
     split = split_profile_frame(frame, test_size=test_size, seed=seed)
     pipeline = build_quality_proxy_pipeline(

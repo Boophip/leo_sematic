@@ -12,12 +12,16 @@ class IllegalActionError(ValueError):
 
 @dataclass(frozen=True)
 class AmcEntry:
+    """One SNR threshold and its fixed AMC spectral efficiency."""
+
     min_snr_db: float
     spectral_efficiency_bps_hz: float
 
 
 @dataclass(frozen=True)
 class LinkState:
+    """Per-slot offload link state exposed to scheduling policies."""
+
     visible: bool
     snr_db: float
     bandwidth_hz: float
@@ -38,6 +42,8 @@ def spectral_efficiency_for_snr(
     snr_db: float,
     table: Sequence[AmcEntry] = DEFAULT_AMC_TABLE,
 ) -> float:
+    """O(1)-style SNR-to-AMC lookup used instead of continuous power solving."""
+
     if not table:
         raise ValueError("AMC table must not be empty")
     selected = 0.0
@@ -53,6 +59,8 @@ def throughput_bps(
     link: LinkState,
     table: Sequence[AmcEntry] = DEFAULT_AMC_TABLE,
 ) -> float:
+    """Return link throughput; invisible or unsupported links are illegal actions."""
+
     if not link.visible:
         raise IllegalActionError("offload link is not visible")
     if link.bandwidth_hz <= 0:
@@ -68,6 +76,8 @@ def transmission_delay_ms(
     link: LinkState,
     table: Sequence[AmcEntry] = DEFAULT_AMC_TABLE,
 ) -> float:
+    """Transmit byte_count over the fixed-power AMC link."""
+
     if byte_count < 0:
         raise ValueError("byte_count must be non-negative")
     if byte_count == 0:
@@ -90,6 +100,8 @@ def offload_communication_delay_ms(
 
 
 def communication_energy_joules(tx_power_w: float, transmit_delay_ms: float) -> float:
+    """Linear transmit energy under the fixed-power radio assumption."""
+
     if tx_power_w < 0:
         raise ValueError("tx_power_w must be non-negative")
     if transmit_delay_ms < 0:

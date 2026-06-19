@@ -20,6 +20,8 @@ from src.simulation.link import (
 
 @dataclass(frozen=True)
 class TaskCostProfile:
+    """Profiled action costs imported from offline ROI profiling rows."""
+
     compressed_bytes: int
     encode_ms: float
     decode_ms: float
@@ -29,6 +31,8 @@ class TaskCostProfile:
 
 @dataclass(frozen=True)
 class TaskEvaluation:
+    """Physical accounting result for one local or offloaded ROI action."""
+
     total_delay_ms: float
     communication_delay_ms: float
     queue_wait_ms: float
@@ -50,6 +54,8 @@ def _validate_task_profile(profile: TaskCostProfile) -> None:
 
 
 def evaluate_local_task(profile: TaskCostProfile, node: ComputeNode) -> TaskEvaluation:
+    """Evaluate local execution; no communication payload is charged."""
+
     _validate_task_profile(profile)
     task_cycles = cycles_from_inference_ms(
         profile.inference_ms,
@@ -75,6 +81,8 @@ def evaluate_offload_task(
     *,
     tx_power_w: float = 5.0,
 ) -> TaskEvaluation:
+    """Evaluate offloaded execution from encoded ROI payload to result return."""
+
     _validate_task_profile(profile)
     task_cycles = cycles_from_inference_ms(
         profile.inference_ms,
@@ -87,6 +95,8 @@ def evaluate_offload_task(
         link,
         result_bytes=profile.result_bytes,
     )
+    # Energy only charges actual RF transmit time; encode/decode latency is
+    # included in delay but not in the radio energy term.
     tx_ms = transmission_delay_ms(profile.compressed_bytes, link) + transmission_delay_ms(
         profile.result_bytes,
         link,

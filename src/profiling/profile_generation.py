@@ -15,6 +15,8 @@ from src.profiling.compression import DEFAULT_BETA_LEVELS, compress_image
 
 @dataclass(frozen=True)
 class ExitProfile:
+    """Per-exit model result measured after a selected compression transform."""
+
     exit_level: int
     inference_ms: float
     task_quality: float
@@ -24,6 +26,8 @@ class ExitProfile:
 
 @dataclass(frozen=True)
 class RoiProfileRow:
+    """Single ROI x exit x compression row consumed by proxy and simulation."""
+
     roi_id: str
     image_id: str
     predicted_class: str
@@ -55,6 +59,8 @@ Predictor = Callable[[Image.Image, Mapping[str, object]], Sequence[ExitProfile]]
 
 
 def load_roi_metadata(path: Path, *, limit_rois: int | None = None) -> list[dict[str, object]]:
+    """Load ROI records while preserving the upstream metadata schema."""
+
     records: list[dict[str, object]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
@@ -82,6 +88,8 @@ def profile_roi_records(
         with Image.open(crop_path) as image:
             source = image.convert("RGB")
         for level in compression_levels:
+            # Compression is performed before model inference so each row
+            # captures the action-dependent byte size, latency, and quality.
             compressed = compress_image(source, level)
             exit_profiles = predictor(compressed.decoded_image, record)
             for exit_profile in exit_profiles:
@@ -115,6 +123,8 @@ def profile_roi_records(
 
 
 def write_profile_csv(path: Path, rows: Iterable[RoiProfileRow]) -> None:
+    """Write rows with a stable column order for downstream scripts."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PROFILE_FIELDNAMES)
