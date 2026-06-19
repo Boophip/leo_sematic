@@ -56,6 +56,27 @@ REPORT_COLUMNS = (
     ("total_aosi_cost", "AoSI Cost"),
     ("qoe_total", "QoE"),
 )
+SCENARIO_SUMMARY_COLUMNS = (
+    ("scenario", "Scenario"),
+    ("best_policy", "Best Policy"),
+    ("best_qoe", "Best QoE"),
+    ("proposed_rl_qoe", "PPO QoE"),
+    ("proposed_rl_rank", "PPO Rank"),
+    ("proposed_rl_gap_to_best_qoe", "PPO Gap"),
+)
+POLICY_AGGREGATE_COLUMNS = (
+    ("policy", "Policy"),
+    ("scenario_count", "Scenarios"),
+    ("mean_rank", "Mean Rank"),
+    ("best_scenario_count", "Best Count"),
+    ("mean_qoe", "Mean QoE"),
+    ("mean_qoe_gap_to_best", "Mean Gap"),
+    ("mean_success_rate", "Mean Success"),
+    ("mean_semantic_success_rate", "Mean Semantic Success"),
+    ("mean_delay_ms", "Mean Delay ms"),
+    ("mean_total_energy_j", "Mean Energy J"),
+    ("mean_total_aosi_cost", "Mean AoSI Cost"),
+)
 
 
 @dataclass(frozen=True)
@@ -401,14 +422,31 @@ def _write_all_scenarios_outputs(
             item["scenario"] = scenario_name
             flattened_rows.append(item)
 
-    pd.DataFrame(flattened_rows).to_csv(output_dir / "comparison_metrics_all.csv", index=False)
+    aggregate_views = _build_multi_scenario_aggregate(flattened_rows)
+    ranked_rows = aggregate_views["ranked_policy_metrics"]
+    scenario_summaries = aggregate_views["scenario_summaries"]
+    policy_aggregate = aggregate_views["policy_aggregate"]
+
+    pd.DataFrame(ranked_rows).to_csv(output_dir / "comparison_metrics_all.csv", index=False)
+    pd.DataFrame(scenario_summaries).to_csv(output_dir / "scenario_winners.csv", index=False)
+    pd.DataFrame(policy_aggregate).to_csv(output_dir / "policy_aggregate.csv", index=False)
     report_path = output_dir / "comparison_report.md"
     lines = [
         "# PPO Smoke Multi-Scenario Comparison",
         "",
         "All rows use the canonical slot QoE metric; PPO training reward is reported separately in each scenario summary.",
         "",
-        _markdown_table(flattened_rows, include_scenario=True),
+        "## Scenario Winners",
+        "",
+        _markdown_table_with_columns(scenario_summaries, SCENARIO_SUMMARY_COLUMNS),
+        "",
+        "## Policy Averages",
+        "",
+        _markdown_table_with_columns(policy_aggregate, POLICY_AGGREGATE_COLUMNS),
+        "",
+        "## Full Policy Metrics",
+        "",
+        _markdown_table(ranked_rows, include_scenario=True),
         "",
     ]
     report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -416,9 +454,13 @@ def _write_all_scenarios_outputs(
         "purpose": "PPO smoke multi-scenario summary; not a formal paper result.",
         "output_dir": str(output_dir.resolve()),
         "scenarios": list(summaries),
-        "policy_metrics": flattened_rows,
+        "policy_metrics": ranked_rows,
+        "scenario_summaries": scenario_summaries,
+        "policy_aggregate": policy_aggregate,
         "outputs": {
             "comparison_metrics_all": str((output_dir / "comparison_metrics_all.csv").resolve()),
+            "scenario_winners": str((output_dir / "scenario_winners.csv").resolve()),
+            "policy_aggregate": str((output_dir / "policy_aggregate.csv").resolve()),
             "comparison_report": str(report_path.resolve()),
             "summary_all": str((output_dir / "summary_all.json").resolve()),
         },
@@ -428,6 +470,85 @@ def _write_all_scenarios_outputs(
         encoding="utf-8",
     )
     return aggregate
+
+
+def _build_multi_scenario_aggregate(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    """Build report-only rankings from canonical QoE without changing formulas."""
+
+    ranked_rows: list[dict[str, object]] = []
+    scenario_summaries: list[dict[str, object]] = []
+    rows_by_scenario: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        rows_by_scenario.setdefault(str(row["scenario"]), []).append(row)
+
+    for scenario_name in rows_by_scenario:
+        scenario_rows = sorted(
+            rows_by_scenario[scenario_name],
+            key=lambda row: (-float(row["qoe_total"]), str(row["policy"])),
+        )
+        best_row = scenario_rows[0]
+        best_qoe = float(best_row["qoe_total"])
+        proposed_row: dict[str, object] | None = None
+        for rank, row in enumerate(scenario_rows, start=1):
+            ranked_row = dict(row)
+            ranked_row["scenario_rank"] = rank
+            ranked_row["is_best_policy"] = rank == 1
+            ranked_row["qoe_gap_to_best"] = float(row["qoe_total"]) - best_qoe
+            ranked_rows.append(ranked_row)
+            if ranked_row["policy"] == "Proposed-RL":
+                proposed_row = ranked_row
+
+        scenario_summaries.append(
+            {
+                "scenario": scenario_name,
+                "best_policy": best_row["policy"],
+                "best_qoe": best_qoe,
+                "proposed_rl_qoe": None if proposed_row is None else float(proposed_row["qoe_total"]),
+                "proposed_rl_rank": None if proposed_row is None else int(proposed_row["scenario_rank"]),
+                "proposed_rl_gap_to_best_qoe": (
+                    None if proposed_row is None else float(proposed_row["qoe_gap_to_best"])
+                ),
+            }
+        )
+
+    policy_aggregate = _build_policy_aggregate(ranked_rows)
+    return {
+        "ranked_policy_metrics": ranked_rows,
+        "scenario_summaries": scenario_summaries,
+        "policy_aggregate": policy_aggregate,
+    }
+
+
+def _build_policy_aggregate(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    rows_by_policy: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        rows_by_policy.setdefault(str(row["policy"]), []).append(row)
+
+    aggregate_rows: list[dict[str, object]] = []
+    for policy_name, policy_rows in rows_by_policy.items():
+        aggregate_rows.append(
+            {
+                "policy": policy_name,
+                "scenario_count": len(policy_rows),
+                "mean_rank": _mean_metric(policy_rows, "scenario_rank"),
+                "best_scenario_count": sum(1 for row in policy_rows if bool(row["is_best_policy"])),
+                "mean_qoe": _mean_metric(policy_rows, "qoe_total"),
+                "mean_qoe_gap_to_best": _mean_metric(policy_rows, "qoe_gap_to_best"),
+                "mean_success_rate": _mean_metric(policy_rows, "success_rate"),
+                "mean_semantic_success_rate": _mean_metric(policy_rows, "semantic_success_rate"),
+                "mean_delay_ms": _mean_metric(policy_rows, "mean_delay_ms"),
+                "mean_total_energy_j": _mean_metric(policy_rows, "total_energy_j"),
+                "mean_total_aosi_cost": _mean_metric(policy_rows, "total_aosi_cost"),
+            }
+        )
+    return sorted(aggregate_rows, key=lambda row: (-float(row["mean_qoe"]), str(row["policy"])))
+
+
+def _mean_metric(rows: Sequence[Mapping[str, object]], key: str) -> float:
+    values = [float(row[key]) for row in rows]
+    return sum(values) / len(values) if values else 0.0
 
 
 def _write_comparison_report(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
@@ -444,6 +565,13 @@ def _write_comparison_report(path: Path, rows: Sequence[Mapping[str, object]]) -
 
 def _markdown_table(rows: Sequence[Mapping[str, object]], *, include_scenario: bool = False) -> str:
     columns = (("scenario", "Scenario"),) + REPORT_COLUMNS if include_scenario else REPORT_COLUMNS
+    return _markdown_table_with_columns(rows, columns)
+
+
+def _markdown_table_with_columns(
+    rows: Sequence[Mapping[str, object]],
+    columns: Sequence[tuple[str, str]],
+) -> str:
     header = "| " + " | ".join(label for _, label in columns) + " |"
     separator = "| " + " | ".join("---" for _ in columns) + " |"
     body = [
@@ -454,8 +582,12 @@ def _markdown_table(rows: Sequence[Mapping[str, object]], *, include_scenario: b
 
 
 def _format_report_value(key: str, value: object) -> str:
-    if key in {"policy", "scenario"}:
+    if value in {"", None}:
+        return ""
+    if key in {"policy", "scenario", "best_policy"}:
         return str(value)
+    if key in {"scenario_count", "best_scenario_count", "proposed_rl_rank", "scenario_rank"}:
+        return str(int(float(value)))
     if key == "total_compressed_bytes":
         return str(int(float(value)))
     return f"{float(value):.4f}"

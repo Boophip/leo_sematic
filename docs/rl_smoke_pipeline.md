@@ -74,6 +74,9 @@ subdirectory, and the root output directory also writes:
 
 ```text
 outputs/rl/ppo_smoke/comparison_metrics_all.csv
+outputs/rl/ppo_smoke/scenario_winners.csv
+outputs/rl/ppo_smoke/policy_aggregate.csv
+outputs/rl/ppo_smoke/comparison_report.md
 outputs/rl/ppo_smoke/summary_all.json
 ```
 
@@ -81,6 +84,10 @@ outputs/rl/ppo_smoke/summary_all.json
 environment. `qoe_total` in reports is the canonical slot-level QoE shared with
 the deterministic baseline evaluator, so it is the value to use for policy
 comparison.
+
+For all-scenario runs, `scenario_winners.csv` records the best policy, PPO
+rank, and PPO QoE gap in each stress preset. `policy_aggregate.csv` records
+cross-scenario averages and best-counts for each policy.
 
 The comparison report includes `Proposed-RL` plus:
 
