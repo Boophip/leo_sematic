@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class PpoFormalExperimentTests(unittest.TestCase):
+    def test_formal_aggregate_computes_policy_mean_std_and_scenario_summary(self) -> None:
+        runner = _load_runner_module()
+        seed_results = [
+            {
+                "seed": 42,
+                "summary": _seed_summary(
+                    [
+                        _metric_row("default", "Proposed-RL", 2.0, rank=1, is_best=True),
+                        _metric_row("default", "Best-SNR", 1.0, rank=2, is_best=False),
+                        _metric_row("low_snr", "Proposed-RL", 0.0, rank=2, is_best=False),
+                        _metric_row("low_snr", "Best-SNR", 3.0, rank=1, is_best=True),
+                    ],
+                    [
+                        _winner_row("default", "Proposed-RL", 2.0, 1, 0.0),
+                        _winner_row("low_snr", "Best-SNR", 0.0, 2, -3.0),
+                    ],
+                ),
+            },
+            {
+                "seed": 43,
+                "summary": _seed_summary(
+                    [
+                        _metric_row("default", "Proposed-RL", 4.0, rank=1, is_best=True),
+                        _metric_row("default", "Best-SNR", 1.0, rank=2, is_best=False),
+                        _metric_row("low_snr", "Proposed-RL", 2.0, rank=1, is_best=True),
+                        _metric_row("low_snr", "Best-SNR", 1.0, rank=2, is_best=False),
+                    ],
+                    [
+                        _winner_row("default", "Proposed-RL", 4.0, 1, 0.0),
+                        _winner_row("low_snr", "Proposed-RL", 2.0, 1, 0.0),
+                    ],
+                ),
+            },
+        ]
+
+        aggregate = runner._build_formal_aggregate(seed_results)
+
+        proposed = next(row for row in aggregate["policy_formal_aggregate"] if row["policy"] == "Proposed-RL")
+        self.assertEqual(proposed["sample_count"], 4)
+        self.assertEqual(proposed["seed_count"], 2)
+        self.assertEqual(proposed["scenario_count"], 2)
+        self.assertEqual(proposed["best_count"], 3)
+        self.assertAlmostEqual(proposed["mean_qoe"], 2.0)
+        self.assertAlmostEqual(proposed["std_qoe"], 2.0 ** 0.5)
+
+        low_snr = next(row for row in aggregate["scenario_formal_summary"] if row["scenario"] == "low_snr")
+        self.assertEqual(low_snr["best_policy"], "Best-SNR")
+        self.assertAlmostEqual(low_snr["best_mean_qoe"], 2.0)
+        self.assertAlmostEqual(low_snr["proposed_rl_mean_qoe"], 1.0)
+        self.assertAlmostEqual(low_snr["proposed_rl_mean_gap_to_best"], -1.0)
+
+    def test_seed_command_passes_all_scenarios_and_seed(self) -> None:
+        runner = _load_runner_module()
+        settings = runner.FormalExperimentSettings(
+            seeds=(7,),
+            output_dir=ROOT / "outputs" / "rl" / "tmp_formal_test",
+            limit_rois=64,
+            total_timesteps=128,
+            python_executable=Path(sys.executable),
+            config=None,
+            profile_csv=None,
+            quality_proxy=None,
+            rois_per_slot=None,
+            deadline_ms=None,
+            quality_threshold=None,
+            exist_ok=True,
+            dry_run=False,
+            skip_plots=True,
+        )
+
+        command = runner._build_seed_command(settings, 7)
+
+        self.assertIn("--all-scenarios", command)
+        self.assertIn("--seed", command)
+        self.assertIn("7", command)
+        self.assertIn("--exist-ok", command)
+
+    def test_runtime_estimate_scales_with_seed_and_scenario_count(self) -> None:
+        runner = _load_runner_module()
+        settings = runner.FormalExperimentSettings(
+            seeds=(42, 43, 44),
+            output_dir=ROOT / "outputs" / "rl" / "tmp_formal_test",
+            limit_rois=512,
+            total_timesteps=5000,
+            python_executable=Path(sys.executable),
+            config=None,
+            profile_csv=None,
+            quality_proxy=None,
+            rois_per_slot=None,
+            deadline_ms=None,
+            quality_threshold=None,
+            exist_ok=True,
+            dry_run=False,
+            skip_plots=True,
+        )
+
+        estimate = runner._runtime_estimate(settings)
+
+        self.assertIn("24-96 minutes", estimate)
+
+
+def _seed_summary(
+    policy_metrics: list[dict[str, object]],
+    scenario_summaries: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "policy_metrics": policy_metrics,
+        "scenario_summaries": scenario_summaries,
+    }
+
+
+def _metric_row(
+    scenario: str,
+    policy: str,
+    qoe: float,
+    *,
+    rank: int,
+    is_best: bool,
+) -> dict[str, object]:
+    return {
+        "scenario": scenario,
+        "policy": policy,
+        "qoe_total": qoe,
+        "scenario_rank": rank,
+        "is_best_policy": is_best,
+        "qoe_gap_to_best": 0.0 if is_best else qoe - 3.0,
+        "success_rate": 0.5,
+        "semantic_success_rate": 0.5,
+        "mean_delay_ms": 10.0,
+        "total_energy_j": 0.1,
+        "total_aosi_cost": 1.0,
+    }
+
+
+def _winner_row(
+    scenario: str,
+    best_policy: str,
+    proposed_qoe: float,
+    proposed_rank: int,
+    proposed_gap: float,
+) -> dict[str, object]:
+    return {
+        "scenario": scenario,
+        "best_policy": best_policy,
+        "best_qoe": proposed_qoe - proposed_gap,
+        "proposed_rl_qoe": proposed_qoe,
+        "proposed_rl_rank": proposed_rank,
+        "proposed_rl_gap_to_best_qoe": proposed_gap,
+    }
+
+
+def _load_runner_module():
+    script_path = ROOT / "scripts" / "18_run_ppo_formal_experiment.py"
+    spec = importlib.util.spec_from_file_location("run_ppo_formal_experiment", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load script module: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+if __name__ == "__main__":
+    unittest.main()

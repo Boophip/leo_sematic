@@ -107,3 +107,6 @@ AoSI-Greedy
 F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -p test_rl_env.py -v
 F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -v
 ```
+
+The multi-seed formal experiment manager that repeats this runner and writes
+mean/std reports is documented in `docs/ppo_formal_experiment_pipeline.md`.
