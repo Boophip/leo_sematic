@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import pandas as pd
 
@@ -63,6 +63,14 @@ class FormalExperimentSettings:
     rois_per_slot: int | None
     deadline_ms: float | None
     quality_threshold: float | None
+    ppo_n_steps: int | None
+    ppo_batch_size: int | None
+    ppo_n_epochs: int | None
+    ppo_learning_rate: float | None
+    ppo_gamma: float | None
+    ppo_ent_coef: float | None
+    eval_frequency: int
+    checkpoint_frequency: int
     exist_ok: bool
     dry_run: bool
     skip_plots: bool
@@ -81,6 +89,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rois-per-slot", type=int)
     parser.add_argument("--deadline-ms", type=float)
     parser.add_argument("--quality-threshold", type=float)
+    parser.add_argument("--ppo-n-steps", type=int)
+    parser.add_argument("--ppo-batch-size", type=int)
+    parser.add_argument("--ppo-n-epochs", type=int)
+    parser.add_argument("--ppo-learning-rate", type=float)
+    parser.add_argument("--ppo-gamma", type=float)
+    parser.add_argument("--ppo-ent-coef", type=float)
+    parser.add_argument("--eval-frequency", type=int, default=0)
+    parser.add_argument("--checkpoint-frequency", type=int, default=0)
     parser.add_argument("--exist-ok", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
@@ -100,6 +116,14 @@ def _resolve_settings(args: argparse.Namespace) -> FormalExperimentSettings:
         rois_per_slot=args.rois_per_slot,
         deadline_ms=args.deadline_ms,
         quality_threshold=args.quality_threshold,
+        ppo_n_steps=args.ppo_n_steps,
+        ppo_batch_size=args.ppo_batch_size,
+        ppo_n_epochs=args.ppo_n_epochs,
+        ppo_learning_rate=args.ppo_learning_rate,
+        ppo_gamma=args.ppo_gamma,
+        ppo_ent_coef=args.ppo_ent_coef,
+        eval_frequency=int(args.eval_frequency),
+        checkpoint_frequency=int(args.checkpoint_frequency),
         exist_ok=bool(args.exist_ok),
         dry_run=bool(args.dry_run),
         skip_plots=bool(args.skip_plots),
@@ -125,6 +149,24 @@ def _validate_settings(settings: FormalExperimentSettings) -> None:
     for path in (settings.config, settings.profile_csv, settings.quality_proxy):
         if path is not None and not path.is_file():
             raise FileNotFoundError(f"input file not found: {path}")
+    for name, value in (
+        ("--ppo-n-steps", settings.ppo_n_steps),
+        ("--ppo-batch-size", settings.ppo_batch_size),
+        ("--ppo-n-epochs", settings.ppo_n_epochs),
+    ):
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be positive")
+    for name, value in (
+        ("--ppo-learning-rate", settings.ppo_learning_rate),
+        ("--ppo-gamma", settings.ppo_gamma),
+        ("--ppo-ent-coef", settings.ppo_ent_coef),
+    ):
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if settings.eval_frequency < 0:
+        raise ValueError("--eval-frequency must be non-negative")
+    if settings.checkpoint_frequency < 0:
+        raise ValueError("--checkpoint-frequency must be non-negative")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -173,6 +215,17 @@ def _build_seed_command(settings: FormalExperimentSettings, seed: int) -> list[s
         ("--rois-per-slot", settings.rois_per_slot),
         ("--deadline-ms", settings.deadline_ms),
         ("--quality-threshold", settings.quality_threshold),
+        ("--ppo-n-steps", settings.ppo_n_steps),
+        ("--ppo-batch-size", settings.ppo_batch_size),
+        ("--ppo-n-epochs", settings.ppo_n_epochs),
+        ("--ppo-learning-rate", settings.ppo_learning_rate),
+        ("--ppo-gamma", settings.ppo_gamma),
+        ("--ppo-ent-coef", settings.ppo_ent_coef),
+        ("--eval-frequency", settings.eval_frequency if settings.eval_frequency > 0 else None),
+        (
+            "--checkpoint-frequency",
+            settings.checkpoint_frequency if settings.checkpoint_frequency > 0 else None,
+        ),
     ]
     for flag, value in optional_args:
         if value is not None:
@@ -195,6 +248,7 @@ def _run_seed(settings: FormalExperimentSettings, seed: int) -> dict[str, object
 def _build_formal_aggregate(seed_results: Sequence[Mapping[str, object]]) -> dict[str, list[dict[str, object]]]:
     policy_rows: list[dict[str, object]] = []
     scenario_winner_rows: list[dict[str, object]] = []
+    training_curve_rows: list[dict[str, object]] = []
     for seed_result in seed_results:
         seed = int(seed_result["seed"])
         summary = seed_result["summary"]
@@ -206,6 +260,7 @@ def _build_formal_aggregate(seed_results: Sequence[Mapping[str, object]]) -> dic
             item = dict(row)
             item["seed"] = seed
             scenario_winner_rows.append(item)
+        training_curve_rows.extend(_read_seed_training_curves(seed, summary))
 
     scenario_policy_aggregate = _aggregate_by_keys(policy_rows, ("scenario", "policy"))
     policy_formal_aggregate = _aggregate_by_keys(policy_rows, ("policy",))
@@ -216,7 +271,27 @@ def _build_formal_aggregate(seed_results: Sequence[Mapping[str, object]]) -> dic
         "scenario_policy_aggregate": scenario_policy_aggregate,
         "policy_formal_aggregate": policy_formal_aggregate,
         "scenario_formal_summary": scenario_formal_summary,
+        "training_curve": training_curve_rows,
     }
+
+
+def _read_seed_training_curves(seed: int, summary: Mapping[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for scenario_summary in summary.get("scenarios", []):
+        outputs = scenario_summary.get("outputs", {})
+        curve_path = outputs.get("training_curve")
+        if not curve_path:
+            continue
+        path = Path(str(curve_path))
+        if not path.is_file():
+            continue
+        frame = pd.read_csv(path)
+        for row in frame.to_dict(orient="records"):
+            item = dict(row)
+            item.setdefault("seed", seed)
+            item.setdefault("scenario", scenario_summary["configuration"]["scenario"])
+            rows.append(item)
+    return rows
 
 
 def _aggregate_by_keys(
@@ -310,12 +385,14 @@ def _write_formal_outputs(
         "scenario_policy_aggregate": output_dir / "scenario_policy_aggregate.csv",
         "policy_formal_aggregate": output_dir / "policy_formal_aggregate.csv",
         "scenario_formal_summary": output_dir / "scenario_formal_summary.csv",
+        "training_curve_all": output_dir / "training_curve_all.csv",
         "comparison_report": output_dir / "comparison_report.md",
         "summary": output_dir / "summary.json",
     }
     for key, path in outputs.items():
         if path.suffix == ".csv":
-            pd.DataFrame(aggregate[key]).to_csv(path, index=False)
+            aggregate_key = "training_curve" if key == "training_curve_all" else key
+            pd.DataFrame(aggregate[aggregate_key]).to_csv(path, index=False)
 
     figures = {}
     if not settings.skip_plots:
@@ -335,6 +412,16 @@ def _write_formal_outputs(
             "limit_rois": settings.limit_rois,
             "total_timesteps": settings.total_timesteps,
             "scenarios": list(SCENARIO_NAMES),
+            "eval_frequency": settings.eval_frequency,
+            "checkpoint_frequency": settings.checkpoint_frequency,
+            "ppo_overrides": {
+                "n_steps": settings.ppo_n_steps,
+                "batch_size": settings.ppo_batch_size,
+                "n_epochs": settings.ppo_n_epochs,
+                "learning_rate": settings.ppo_learning_rate,
+                "gamma": settings.ppo_gamma,
+                "ent_coef": settings.ppo_ent_coef,
+            },
         },
         "seed_runs": [
             {
@@ -345,6 +432,7 @@ def _write_formal_outputs(
         ],
         "policy_formal_aggregate": aggregate["policy_formal_aggregate"],
         "scenario_formal_summary": aggregate["scenario_formal_summary"],
+        "training_curve_rows": len(aggregate["training_curve"]),
         "outputs": {
             **{key: str(path.resolve()) for key, path in outputs.items()},
             **{key: str(path.resolve()) for key, path in figures.items()},
@@ -372,6 +460,8 @@ def _write_figures(
         "figure_qoe_by_scenario_policy": figure_dir / "qoe_by_scenario_policy.png",
         "figure_qoe_cdf_by_policy": figure_dir / "qoe_cdf_by_policy.png",
     }
+    if aggregate["training_curve"]:
+        figures["figure_training_curve_qoe"] = figure_dir / "training_curve_qoe.png"
 
     policy_rows = aggregate["policy_formal_aggregate"]
     policies = [str(row["policy"]) for row in policy_rows]
@@ -411,6 +501,23 @@ def _write_figures(
     fig.tight_layout()
     fig.savefig(figures["figure_qoe_cdf_by_policy"], dpi=180)
     plt.close(fig)
+    if aggregate["training_curve"]:
+        curve = pd.DataFrame(aggregate["training_curve"])
+        grouped = (
+            curve.groupby(["scenario", "timestep"], as_index=False)["qoe_total"]
+            .mean()
+            .sort_values(["scenario", "timestep"])
+        )
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for scenario, group in grouped.groupby("scenario"):
+            ax.plot(group["timestep"], group["qoe_total"], marker="o", label=str(scenario))
+        ax.set_xlabel("PPO timesteps")
+        ax.set_ylabel("Mean canonical QoE")
+        ax.set_title("Training Evaluation Curve")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(figures["figure_training_curve_qoe"], dpi=180)
+        plt.close(fig)
     return figures
 
 

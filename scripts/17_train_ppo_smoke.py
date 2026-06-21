@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 import pandas as pd
 import yaml
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -96,6 +97,14 @@ class PpoSmokeSettings:
     eval_only: bool
     model_path: Path | None
     exist_ok: bool
+    ppo_n_steps: int | None
+    ppo_batch_size: int | None
+    ppo_n_epochs: int | None
+    ppo_learning_rate: float | None
+    ppo_gamma: float | None
+    ppo_ent_coef: float | None
+    eval_frequency: int
+    checkpoint_frequency: int
     bandwidth_hz: float
     base_config: SimulationConfig
     node_configs: tuple[SatelliteNodeConfig, ...]
@@ -118,6 +127,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rois-per-slot", type=int)
     parser.add_argument("--deadline-ms", type=float)
     parser.add_argument("--quality-threshold", type=float)
+    parser.add_argument("--ppo-n-steps", type=int)
+    parser.add_argument("--ppo-batch-size", type=int)
+    parser.add_argument("--ppo-n-epochs", type=int)
+    parser.add_argument("--ppo-learning-rate", type=float)
+    parser.add_argument("--ppo-gamma", type=float)
+    parser.add_argument("--ppo-ent-coef", type=float)
+    parser.add_argument("--eval-frequency", type=int, default=0)
+    parser.add_argument("--checkpoint-frequency", type=int, default=0)
     parser.add_argument("--exist-ok", action="store_true")
     return parser.parse_args()
 
@@ -193,6 +210,14 @@ def _resolve_settings(args: argparse.Namespace) -> PpoSmokeSettings:
         eval_only=bool(args.eval_only),
         model_path=_resolve_path(args.model_path) if args.model_path is not None else None,
         exist_ok=bool(args.exist_ok),
+        ppo_n_steps=args.ppo_n_steps,
+        ppo_batch_size=args.ppo_batch_size,
+        ppo_n_epochs=args.ppo_n_epochs,
+        ppo_learning_rate=args.ppo_learning_rate,
+        ppo_gamma=args.ppo_gamma,
+        ppo_ent_coef=args.ppo_ent_coef,
+        eval_frequency=int(args.eval_frequency),
+        checkpoint_frequency=int(args.checkpoint_frequency),
         bandwidth_hz=float(link.get("bandwidth_hz", DEFAULT_LINK_BANDWIDTH_HZ)),
         base_config=base_config,
         node_configs=_node_configs_from_payload(payload),
@@ -250,6 +275,24 @@ def _validate_settings(settings: PpoSmokeSettings) -> None:
             raise FileNotFoundError(f"PPO model not found for --eval-only: {model_path}")
     if settings.base_config.rois_per_slot <= 0:
         raise ValueError("rois_per_slot must be positive")
+    for name, value in (
+        ("--ppo-n-steps", settings.ppo_n_steps),
+        ("--ppo-batch-size", settings.ppo_batch_size),
+        ("--ppo-n-epochs", settings.ppo_n_epochs),
+    ):
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be positive")
+    for name, value in (
+        ("--ppo-learning-rate", settings.ppo_learning_rate),
+        ("--ppo-gamma", settings.ppo_gamma),
+        ("--ppo-ent-coef", settings.ppo_ent_coef),
+    ):
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if settings.eval_frequency < 0:
+        raise ValueError("--eval-frequency must be non-negative")
+    if settings.checkpoint_frequency < 0:
+        raise ValueError("--checkpoint-frequency must be non-negative")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -268,17 +311,39 @@ def _select_policies(policy_names: Sequence[str], *, seed: int) -> tuple[Schedul
     return tuple(available[name] for name in policy_names)
 
 
-def _ppo_hyperparameters(total_timesteps: int) -> dict[str, object]:
-    n_steps = min(128, max(16, total_timesteps // 4))
-    batch_size = min(64, n_steps)
+def _ppo_hyperparameters(
+    total_timesteps: int,
+    *,
+    n_steps: int | None = None,
+    batch_size: int | None = None,
+    n_epochs: int | None = None,
+    learning_rate: float | None = None,
+    gamma: float | None = None,
+    ent_coef: float | None = None,
+) -> dict[str, object]:
+    resolved_n_steps = n_steps or min(128, max(16, total_timesteps // 4))
+    resolved_batch_size = batch_size or min(64, resolved_n_steps)
     return {
-        "n_steps": n_steps,
-        "batch_size": batch_size,
-        "n_epochs": 4,
-        "gamma": 0.99,
-        "learning_rate": 3e-4,
+        "n_steps": resolved_n_steps,
+        "batch_size": resolved_batch_size,
+        "n_epochs": n_epochs or 4,
+        "gamma": 0.99 if gamma is None else gamma,
+        "learning_rate": 3e-4 if learning_rate is None else learning_rate,
+        "ent_coef": 0.0 if ent_coef is None else ent_coef,
         "device": "cpu",
     }
+
+
+def _settings_ppo_hyperparameters(settings: PpoSmokeSettings) -> dict[str, object]:
+    return _ppo_hyperparameters(
+        settings.total_timesteps,
+        n_steps=settings.ppo_n_steps,
+        batch_size=settings.ppo_batch_size,
+        n_epochs=settings.ppo_n_epochs,
+        learning_rate=settings.ppo_learning_rate,
+        gamma=settings.ppo_gamma,
+        ent_coef=settings.ppo_ent_coef,
+    )
 
 
 def _runtime_estimate(total_timesteps: int, limit_rois: int) -> str:
@@ -311,19 +376,106 @@ def _make_env(
     )
 
 
+class PpoDiagnosticsCallback(BaseCallback):
+    """Write evaluation rows and checkpoints during one PPO smoke training run."""
+
+    def __init__(
+        self,
+        profiles: ActionProfileTable,
+        settings: PpoSmokeSettings,
+        *,
+        slot_count: int,
+        scenario_name: str,
+    ) -> None:
+        super().__init__(verbose=0)
+        self.profiles = profiles
+        self.settings = settings
+        self.slot_count = slot_count
+        self.scenario_name = scenario_name
+        self.training_curve_rows: list[dict[str, object]] = []
+        self.checkpoint_paths: list[Path] = []
+        self._next_eval_timestep = settings.eval_frequency if settings.eval_frequency > 0 else None
+        self._next_checkpoint_timestep = (
+            settings.checkpoint_frequency if settings.checkpoint_frequency > 0 else None
+        )
+
+    def _on_step(self) -> bool:
+        timestep = int(self.num_timesteps)
+        if self._next_eval_timestep is not None and timestep >= self._next_eval_timestep:
+            self._record_evaluation(timestep)
+            self._next_eval_timestep += self.settings.eval_frequency
+        if self._next_checkpoint_timestep is not None and timestep >= self._next_checkpoint_timestep:
+            self._save_checkpoint(timestep)
+            self._next_checkpoint_timestep += self.settings.checkpoint_frequency
+        return True
+
+    def _on_training_end(self) -> None:
+        if self.settings.eval_frequency > 0:
+            timestep = int(self.num_timesteps)
+            if not self.training_curve_rows or int(self.training_curve_rows[-1]["timestep"]) != timestep:
+                self._record_evaluation(timestep)
+        if self.training_curve_rows:
+            pd.DataFrame(self.training_curve_rows).to_csv(
+                self.settings.output_dir / "training_curve.csv",
+                index=False,
+            )
+
+    def _record_evaluation(self, timestep: int) -> None:
+        eval_env = _make_env(
+            self.profiles,
+            self.settings,
+            slot_count=self.slot_count,
+            scenario_name=self.scenario_name,
+        )
+        result = _evaluate_ppo(self.model, eval_env)
+        metrics = dict(result.metrics)
+        row = {
+            "seed": self.settings.seed,
+            "scenario": self.scenario_name,
+            "timestep": timestep,
+            "qoe_total": metrics.get("qoe_total", 0.0),
+            "training_reward_total": eval_env.training_reward_total,
+            "success_rate": metrics.get("success_rate", 0.0),
+            "semantic_success_rate": metrics.get("semantic_success_rate", 0.0),
+            "mean_delay_ms": metrics.get("mean_delay_ms", 0.0),
+            "total_energy_j": metrics.get("total_energy_j", 0.0),
+            "total_aosi_cost": metrics.get("total_aosi_cost", 0.0),
+            "quality_virtual_queue": eval_env.quality_virtual_queue,
+            "delay_virtual_queue_ms": eval_env.delay_virtual_queue_ms,
+            "local_count": metrics.get("local_count", 0),
+            "offload_count": metrics.get("offload_count", 0),
+            "drop_count": metrics.get("drop_count", 0),
+            "illegal_count": metrics.get("illegal_count", 0),
+            "timeout_count": metrics.get("timeout_count", 0),
+            "quality_violation_count": metrics.get("quality_violation_count", 0),
+        }
+        self.training_curve_rows.append(row)
+        pd.DataFrame(self.training_curve_rows).to_csv(
+            self.settings.output_dir / "training_curve.csv",
+            index=False,
+        )
+
+    def _save_checkpoint(self, timestep: int) -> None:
+        checkpoint_dir = self.settings.output_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / f"step_{timestep}.zip"
+        self.model.save(checkpoint_path)
+        self.checkpoint_paths.append(checkpoint_path)
+
+
 def _train_or_load_model(
     profiles: ActionProfileTable,
     settings: PpoSmokeSettings,
     *,
     slot_count: int,
     scenario_name: str,
-) -> tuple[PPO, float, Mapping[str, object], Path]:
-    hyperparameters = _ppo_hyperparameters(settings.total_timesteps)
+) -> tuple[PPO, float, Mapping[str, object], Path, list[dict[str, object]], list[Path]]:
+    hyperparameters = _settings_ppo_hyperparameters(settings)
     env = _make_env(profiles, settings, slot_count=slot_count, scenario_name=scenario_name)
     if settings.eval_only:
         model_path = settings.model_path or settings.output_dir / "model.zip"
         model = PPO.load(model_path, env=env, device="cpu")
-        return model, 0.0, hyperparameters, model_path
+        return model, 0.0, hyperparameters, model_path, [], []
 
     model = PPO(
         "MlpPolicy",
@@ -332,11 +484,24 @@ def _train_or_load_model(
         verbose=0,
         **hyperparameters,
     )
+    diagnostics = PpoDiagnosticsCallback(
+        profiles,
+        settings,
+        slot_count=slot_count,
+        scenario_name=scenario_name,
+    )
     started = time.perf_counter()
-    model.learn(total_timesteps=settings.total_timesteps)
+    model.learn(total_timesteps=settings.total_timesteps, callback=diagnostics)
     train_seconds = time.perf_counter() - started
     model.save(settings.output_dir / "model")
-    return model, train_seconds, hyperparameters, settings.output_dir / "model.zip"
+    return (
+        model,
+        train_seconds,
+        hyperparameters,
+        settings.output_dir / "model.zip",
+        diagnostics.training_curve_rows,
+        diagnostics.checkpoint_paths,
+    )
 
 
 def _evaluate_ppo(model: PPO, env: LeoSchedulingEnv) -> PolicyRunResult:
@@ -358,6 +523,8 @@ def _write_outputs(
     baseline_results: Sequence[PolicyRunResult],
     hyperparameters: Mapping[str, object],
     scenario_name: str,
+    training_curve_rows: Sequence[Mapping[str, object]],
+    checkpoint_paths: Sequence[Path],
 ) -> dict[str, object]:
     all_results = [ppo_result, *baseline_results]
     metrics_rows = [result.metrics for result in all_results]
@@ -371,6 +538,9 @@ def _write_outputs(
     )
     pd.DataFrame(metrics_rows).to_csv(settings.output_dir / "comparison_metrics.csv", index=False)
     _write_comparison_report(settings.output_dir / "comparison_report.md", metrics_rows)
+    training_curve_path = settings.output_dir / "training_curve.csv"
+    if training_curve_rows and not training_curve_path.is_file():
+        pd.DataFrame(training_curve_rows).to_csv(training_curve_path, index=False)
 
     summary = {
         "purpose": "PPO smoke closure for the LEO semantic scheduling environment; not a formal paper result.",
@@ -390,9 +560,13 @@ def _write_outputs(
             "bandwidth_hz": settings.bandwidth_hz,
             "nodes": [asdict(node) for node in settings.node_configs],
             "ppo_hyperparameters": dict(hyperparameters),
+            "eval_frequency": settings.eval_frequency,
+            "checkpoint_frequency": settings.checkpoint_frequency,
         },
         "runtime_seconds": train_seconds,
         "training_reward_total": ppo_result.metrics.get("training_reward_total", 0.0),
+        "training_curve_rows": len(training_curve_rows),
+        "checkpoint_count": len(checkpoint_paths),
         "policy_metrics": metrics_rows,
         "outputs": {
             "model": str(model_path.resolve()),
@@ -401,6 +575,8 @@ def _write_outputs(
             "comparison_metrics": str((settings.output_dir / "comparison_metrics.csv").resolve()),
             "comparison_report": str((settings.output_dir / "comparison_report.md").resolve()),
             "summary": str((settings.output_dir / "summary.json").resolve()),
+            "training_curve": str(training_curve_path.resolve()) if training_curve_path.is_file() else None,
+            "checkpoints": [str(path.resolve()) for path in checkpoint_paths],
         },
     }
     (settings.output_dir / "summary.json").write_text(
@@ -624,7 +800,14 @@ def main() -> int:
         scenario_output_dir = settings.output_dir / scenario_name if settings.all_scenarios else settings.output_dir
         scenario_output_dir.mkdir(parents=True, exist_ok=True)
         scenario_settings = replace(settings, output_dir=scenario_output_dir, scenario=scenario_name)
-        model, train_seconds, hyperparameters, model_path = _train_or_load_model(
+        (
+            model,
+            train_seconds,
+            hyperparameters,
+            model_path,
+            training_curve_rows,
+            checkpoint_paths,
+        ) = _train_or_load_model(
             profiles,
             scenario_settings,
             slot_count=slot_count,
@@ -661,6 +844,8 @@ def main() -> int:
                 baseline_results=baseline_results,
                 hyperparameters=hyperparameters,
                 scenario_name=scenario_name,
+                training_curve_rows=training_curve_rows,
+                checkpoint_paths=checkpoint_paths,
             )
         )
 

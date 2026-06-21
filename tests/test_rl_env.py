@@ -166,6 +166,33 @@ class LeoSchedulingEnvTests(unittest.TestCase):
         self.assertEqual(len(env.slots), 1)
         self.assertIn(3, env.grid_ages)
         self.assertGreater(env.node_states["source"].queue_cycles, 0.0)
+        self.assertIn("quality_virtual_queue", info)
+        self.assertIn("delay_virtual_queue_ms", info)
+
+    def test_virtual_queues_reset_and_follow_slot_constraints(self) -> None:
+        env = _env(rois_per_slot=1)
+        env.reset()
+
+        self.assertEqual(env.quality_virtual_queue, 0.0)
+        self.assertEqual(env.delay_virtual_queue_ms, 0.0)
+
+        env.step(env.action_index(kind="local", exit_level=1, compression_level="local"))
+        self.assertGreater(env.quality_virtual_queue, 0.0)
+
+        env.step(env.action_index(kind="local", exit_level=2, compression_level="local"))
+        self.assertGreaterEqual(env.quality_virtual_queue, 0.0)
+        self.assertLess(env.quality_virtual_queue, 0.5)
+
+    def test_delay_virtual_queue_only_increases_on_deadline_excess(self) -> None:
+        relaxed_env = _env(rois_per_slot=1, deadline_ms=100.0)
+        relaxed_env.reset()
+        relaxed_env.step(relaxed_env.action_index(kind="local", exit_level=1, compression_level="local"))
+        self.assertEqual(relaxed_env.delay_virtual_queue_ms, 0.0)
+
+        tight_env = _env(rois_per_slot=1, deadline_ms=5.0)
+        tight_env.reset()
+        tight_env.step(tight_env.action_index(kind="local", exit_level=2, compression_level="local"))
+        self.assertGreater(tight_env.delay_virtual_queue_ms, 0.0)
 
     def test_slot_summary_uses_canonical_qoe_builder(self) -> None:
         env = _env(rois_per_slot=2)
@@ -215,6 +242,8 @@ class LeoSchedulingEnvTests(unittest.TestCase):
         forbidden = {"task_quality", "quality_label", "exit_confidence", "predicted_class_id"}
 
         joined = " ".join(env.observation_feature_names)
+        self.assertIn("quality_virtual_queue_norm", joined)
+        self.assertIn("delay_virtual_queue_norm", joined)
         for field in forbidden:
             self.assertNotIn(field, joined)
 

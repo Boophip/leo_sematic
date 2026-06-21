@@ -154,6 +154,8 @@ class LeoSchedulingEnv(gym.Env):
         self._slot_total_value: dict[int, float] = {}
         self._slot_success_value: dict[int, float] = {}
         self.training_reward_total = 0.0
+        self.quality_virtual_queue = 0.0
+        self.delay_virtual_queue_ms = 0.0
         self.decisions: list[DecisionResult] = []
         self.slots: list[SlotSummary] = []
 
@@ -179,6 +181,8 @@ class LeoSchedulingEnv(gym.Env):
         self._slot_total_value = {}
         self._slot_success_value = {}
         self.training_reward_total = 0.0
+        self.quality_virtual_queue = 0.0
+        self.delay_virtual_queue_ms = 0.0
         self.decisions = []
         self.slots = []
         return self._observation(), {"roi_id": self._current_roi_id()}
@@ -229,6 +233,8 @@ class LeoSchedulingEnv(gym.Env):
                 "aosi_cost": aosi_cost,
                 "canonical_slot_reward": canonical_slot_reward,
                 "training_reward_total": self.training_reward_total,
+                "quality_virtual_queue": self.quality_virtual_queue,
+                "delay_virtual_queue_ms": self.delay_virtual_queue_ms,
                 "action_index": action_index,
                 "action_label": spec.label,
             }
@@ -259,7 +265,10 @@ class LeoSchedulingEnv(gym.Env):
     def metrics(self, *, policy_name: str = "Proposed-RL") -> dict[str, object]:
         """Aggregate decisions using the same report contract as deterministic baselines."""
 
-        return summarize_decisions(policy_name, self.decisions, self.slots)
+        metrics = summarize_decisions(policy_name, self.decisions, self.slots)
+        metrics["quality_virtual_queue"] = self.quality_virtual_queue
+        metrics["delay_virtual_queue_ms"] = self.delay_virtual_queue_ms
+        return metrics
 
     def as_policy_run_result(self, *, policy_name: str = "Proposed-RL") -> PolicyRunResult:
         """Return a policy result object compatible with comparison writers."""
@@ -425,11 +434,24 @@ class LeoSchedulingEnv(gym.Env):
             for row in self.decisions
             if row.slot_index == slot_index
         ]
+        self._update_virtual_queues(slot_decisions)
         slot_summary = self._slot_summary(slot_index, slot_decisions, aosi_cost)
         self.slots.append(slot_summary)
         self._slot_total_value = {}
         self._slot_success_value = {}
         return slot_summary
+
+    def _update_virtual_queues(self, decisions: Sequence[DecisionResult]) -> None:
+        quality_deficit = sum(
+            self.config.quality_threshold - row.predicted_quality
+            for row in decisions
+        )
+        delay_excess = sum(
+            max(row.total_delay_ms - self.config.deadline_ms, 0.0)
+            for row in decisions
+        )
+        self.quality_virtual_queue = max(self.quality_virtual_queue + quality_deficit, 0.0)
+        self.delay_virtual_queue_ms = max(self.delay_virtual_queue_ms + delay_excess, 0.0)
 
     def _update_aosi(self, current_values: Mapping[int, float]) -> float:
         total_cost = 0.0
@@ -481,6 +503,14 @@ class LeoSchedulingEnv(gym.Env):
             _safe_div(self.current_index % self.config.rois_per_slot, self.config.rois_per_slot),
             _norm(self.grid_ages.get(roi.grid_id, 0.0), 64.0),
             _clip01(grid_value),
+            _norm(
+                self.quality_virtual_queue,
+                max(self.config.rois_per_slot * max(self.config.quality_threshold, 1.0), 1.0),
+            ),
+            _norm(
+                self.delay_virtual_queue_ms,
+                max(self.config.rois_per_slot * max(self.config.deadline_ms, 1.0), 1.0),
+            ),
         ]
         for node_name in self._node_feature_order():
             queue_cycles = self.node_states.get(node_name)
@@ -622,6 +652,8 @@ class LeoSchedulingEnv(gym.Env):
             "slot_progress",
             "grid_age_norm",
             "grid_value",
+            "quality_virtual_queue_norm",
+            "delay_virtual_queue_norm",
         ]
         for node in self._node_feature_order():
             names.append(f"queue_{node}_norm")

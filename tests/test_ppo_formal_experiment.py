@@ -75,6 +75,14 @@ class PpoFormalExperimentTests(unittest.TestCase):
             rois_per_slot=None,
             deadline_ms=None,
             quality_threshold=None,
+            ppo_n_steps=64,
+            ppo_batch_size=32,
+            ppo_n_epochs=3,
+            ppo_learning_rate=1e-4,
+            ppo_gamma=0.95,
+            ppo_ent_coef=0.01,
+            eval_frequency=128,
+            checkpoint_frequency=256,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,
@@ -86,6 +94,12 @@ class PpoFormalExperimentTests(unittest.TestCase):
         self.assertIn("--seed", command)
         self.assertIn("7", command)
         self.assertIn("--exist-ok", command)
+        self.assertIn("--ppo-ent-coef", command)
+        self.assertIn("0.01", command)
+        self.assertIn("--eval-frequency", command)
+        self.assertIn("128", command)
+        self.assertIn("--checkpoint-frequency", command)
+        self.assertIn("256", command)
 
     def test_runtime_estimate_scales_with_seed_and_scenario_count(self) -> None:
         runner = _load_runner_module()
@@ -101,6 +115,14 @@ class PpoFormalExperimentTests(unittest.TestCase):
             rois_per_slot=None,
             deadline_ms=None,
             quality_threshold=None,
+            ppo_n_steps=None,
+            ppo_batch_size=None,
+            ppo_n_epochs=None,
+            ppo_learning_rate=None,
+            ppo_gamma=None,
+            ppo_ent_coef=None,
+            eval_frequency=0,
+            checkpoint_frequency=0,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,

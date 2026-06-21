@@ -37,6 +37,12 @@ All deterministic stress scenarios:
 F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 128 --all-scenarios --exist-ok
 ```
 
+Diagnostic training run:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 256 --eval-frequency 128 --checkpoint-frequency 128 --exist-ok
+```
+
 Reuse an existing checkpoint without training:
 
 ```powershell
@@ -67,6 +73,8 @@ outputs/rl/ppo_smoke/eval_decisions.csv
 outputs/rl/ppo_smoke/eval_metrics.json
 outputs/rl/ppo_smoke/comparison_metrics.csv
 outputs/rl/ppo_smoke/comparison_report.md
+outputs/rl/ppo_smoke/training_curve.csv
+outputs/rl/ppo_smoke/checkpoints/
 ```
 
 With `--all-scenarios`, each scenario writes the same files under its own
@@ -88,6 +96,16 @@ comparison.
 For all-scenario runs, `scenario_winners.csv` records the best policy, PPO
 rank, and PPO QoE gap in each stress preset. `policy_aggregate.csv` records
 cross-scenario averages and best-counts for each policy.
+
+`--ppo-n-steps`, `--ppo-batch-size`, `--ppo-n-epochs`,
+`--ppo-learning-rate`, `--ppo-gamma`, and `--ppo-ent-coef` override PPO
+training hyperparameters for diagnostics. `--eval-frequency` writes canonical
+QoE evaluation rows during training, and `--checkpoint-frequency` writes
+intermediate PPO checkpoints.
+
+The RL observation includes quality and delay virtual queues following the
+paper's constraint-tracking idea. These queues are reported separately and do
+not change the canonical slot-level `qoe_total` used for policy comparison.
 
 The comparison report includes `Proposed-RL` plus:
 

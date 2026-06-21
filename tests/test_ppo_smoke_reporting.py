@@ -54,6 +54,26 @@ class PpoSmokeReportingTests(unittest.TestCase):
         self.assertIn("Semantic-Greedy", table)
         self.assertIn("| default | Semantic-Greedy | 2.5000 | 1.0000 | 2 | -1.5000 |", table)
 
+    def test_ppo_hyperparameter_overrides_are_applied(self) -> None:
+        runner = _load_runner_module()
+
+        hyperparameters = runner._ppo_hyperparameters(
+            1024,
+            n_steps=64,
+            batch_size=32,
+            n_epochs=3,
+            learning_rate=1e-4,
+            gamma=0.95,
+            ent_coef=0.01,
+        )
+
+        self.assertEqual(hyperparameters["n_steps"], 64)
+        self.assertEqual(hyperparameters["batch_size"], 32)
+        self.assertEqual(hyperparameters["n_epochs"], 3)
+        self.assertEqual(hyperparameters["learning_rate"], 1e-4)
+        self.assertEqual(hyperparameters["gamma"], 0.95)
+        self.assertEqual(hyperparameters["ent_coef"], 0.01)
+
 
 def _metric_row(scenario: str, policy: str, qoe: float, *, delay_ms: float) -> dict[str, object]:
     return {
