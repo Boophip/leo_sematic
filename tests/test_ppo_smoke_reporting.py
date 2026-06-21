@@ -74,6 +74,44 @@ class PpoSmokeReportingTests(unittest.TestCase):
         self.assertEqual(hyperparameters["gamma"], 0.95)
         self.assertEqual(hyperparameters["ent_coef"], 0.01)
 
+    def test_select_best_checkpoint_requires_eval_frequency(self) -> None:
+        runner = _load_runner_module()
+        settings = runner.PpoSmokeSettings(
+            config_path=None,
+            config_loaded=False,
+            profile_csv=Path(__file__),
+            quality_proxy=Path(__file__),
+            output_dir=ROOT / "outputs" / "rl" / "tmp_smoke_test",
+            limit_rois=64,
+            total_timesteps=128,
+            seed=42,
+            scenario="default",
+            all_scenarios=False,
+            eval_only=False,
+            model_path=None,
+            exist_ok=True,
+            ppo_n_steps=None,
+            ppo_batch_size=None,
+            ppo_n_epochs=None,
+            ppo_learning_rate=None,
+            ppo_gamma=None,
+            ppo_ent_coef=None,
+            eval_frequency=0,
+            checkpoint_frequency=0,
+            select_best_checkpoint=True,
+            best_checkpoint_min_success_rate=0.0,
+            reward_quality_deficit_weight=0.0,
+            reward_delay_excess_weight=0.0,
+            reward_virtual_queue_weight=0.0,
+            bandwidth_hz=runner.DEFAULT_LINK_BANDWIDTH_HZ,
+            base_config=runner.SimulationConfig(),
+            node_configs=runner.default_node_configs(),
+            policy_names=(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "--select-best-checkpoint"):
+            runner._validate_settings(settings)
+
 
 def _metric_row(scenario: str, policy: str, qoe: float, *, delay_ms: float) -> dict[str, object]:
     return {

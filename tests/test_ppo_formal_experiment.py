@@ -83,6 +83,11 @@ class PpoFormalExperimentTests(unittest.TestCase):
             ppo_ent_coef=0.01,
             eval_frequency=128,
             checkpoint_frequency=256,
+            select_best_checkpoint=True,
+            best_checkpoint_min_success_rate=0.5,
+            reward_quality_deficit_weight=0.3,
+            reward_delay_excess_weight=0.5,
+            reward_virtual_queue_weight=0.1,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,
@@ -100,6 +105,15 @@ class PpoFormalExperimentTests(unittest.TestCase):
         self.assertIn("128", command)
         self.assertIn("--checkpoint-frequency", command)
         self.assertIn("256", command)
+        self.assertIn("--select-best-checkpoint", command)
+        self.assertIn("--best-checkpoint-min-success-rate", command)
+        self.assertIn("0.5", command)
+        self.assertIn("--reward-quality-deficit-weight", command)
+        self.assertIn("0.3", command)
+        self.assertIn("--reward-delay-excess-weight", command)
+        self.assertIn("0.5", command)
+        self.assertIn("--reward-virtual-queue-weight", command)
+        self.assertIn("0.1", command)
 
     def test_runtime_estimate_scales_with_seed_and_scenario_count(self) -> None:
         runner = _load_runner_module()
@@ -123,6 +137,11 @@ class PpoFormalExperimentTests(unittest.TestCase):
             ppo_ent_coef=None,
             eval_frequency=0,
             checkpoint_frequency=0,
+            select_best_checkpoint=False,
+            best_checkpoint_min_success_rate=0.0,
+            reward_quality_deficit_weight=0.0,
+            reward_delay_excess_weight=0.0,
+            reward_virtual_queue_weight=0.0,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,

@@ -43,6 +43,12 @@ Diagnostic training run:
 F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 256 --eval-frequency 128 --checkpoint-frequency 128 --exist-ok
 ```
 
+Constraint-shaping diagnostic run:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 128 --total-timesteps 1024 --eval-frequency 256 --checkpoint-frequency 256 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --exist-ok
+```
+
 Reuse an existing checkpoint without training:
 
 ```powershell
@@ -68,13 +74,24 @@ STK, TLE, or external orbit simulator is required for this smoke closure.
 
 ```text
 outputs/rl/ppo_smoke/model.zip
+outputs/rl/ppo_smoke/final_model.zip
 outputs/rl/ppo_smoke/summary.json
 outputs/rl/ppo_smoke/eval_decisions.csv
 outputs/rl/ppo_smoke/eval_metrics.json
 outputs/rl/ppo_smoke/comparison_metrics.csv
 outputs/rl/ppo_smoke/comparison_report.md
+```
+
+Diagnostic runs with evaluation/checkpoint frequency can additionally write:
+
+```text
+outputs/rl/ppo_smoke/best_model.zip
 outputs/rl/ppo_smoke/training_curve.csv
 outputs/rl/ppo_smoke/checkpoints/
+outputs/rl/ppo_smoke/figures/training_curve_qoe.png
+outputs/rl/ppo_smoke/figures/training_curve_actions.png
+outputs/rl/ppo_smoke/figures/training_curve_violations.png
+outputs/rl/ppo_smoke/figures/training_curve_queues.png
 ```
 
 With `--all-scenarios`, each scenario writes the same files under its own
@@ -102,6 +119,19 @@ cross-scenario averages and best-counts for each policy.
 training hyperparameters for diagnostics. `--eval-frequency` writes canonical
 QoE evaluation rows during training, and `--checkpoint-frequency` writes
 intermediate PPO checkpoints.
+
+`--select-best-checkpoint` requires `--eval-frequency > 0`. When enabled,
+`model.zip` is the checkpoint with the best canonical evaluation QoE during
+training. `final_model.zip` still preserves the last PPO update, and
+`best_model.zip` preserves the best evaluation checkpoint.
+Use `--best-checkpoint-min-success-rate` to avoid selecting a high-QoE but
+degenerate all-drop checkpoint.
+
+`--reward-quality-deficit-weight`, `--reward-delay-excess-weight`, and
+`--reward-virtual-queue-weight` add optional constraint-aware shaping to the PPO
+training reward. They are diagnostic stabilizers inspired by the paper's
+quality and delay virtual queues. They do not change the canonical slot-level
+`qoe_total` formula used for reports and baseline comparison.
 
 The RL observation includes quality and delay virtual queues following the
 paper's constraint-tracking idea. These queues are reported separately and do

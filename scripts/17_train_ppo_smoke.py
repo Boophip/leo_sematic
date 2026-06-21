@@ -105,6 +105,11 @@ class PpoSmokeSettings:
     ppo_ent_coef: float | None
     eval_frequency: int
     checkpoint_frequency: int
+    select_best_checkpoint: bool
+    best_checkpoint_min_success_rate: float
+    reward_quality_deficit_weight: float
+    reward_delay_excess_weight: float
+    reward_virtual_queue_weight: float
     bandwidth_hz: float
     base_config: SimulationConfig
     node_configs: tuple[SatelliteNodeConfig, ...]
@@ -135,6 +140,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-ent-coef", type=float)
     parser.add_argument("--eval-frequency", type=int, default=0)
     parser.add_argument("--checkpoint-frequency", type=int, default=0)
+    parser.add_argument("--select-best-checkpoint", action="store_true")
+    parser.add_argument("--best-checkpoint-min-success-rate", type=float, default=0.0)
+    parser.add_argument("--reward-quality-deficit-weight", type=float, default=0.0)
+    parser.add_argument("--reward-delay-excess-weight", type=float, default=0.0)
+    parser.add_argument("--reward-virtual-queue-weight", type=float, default=0.0)
     parser.add_argument("--exist-ok", action="store_true")
     return parser.parse_args()
 
@@ -218,6 +228,11 @@ def _resolve_settings(args: argparse.Namespace) -> PpoSmokeSettings:
         ppo_ent_coef=args.ppo_ent_coef,
         eval_frequency=int(args.eval_frequency),
         checkpoint_frequency=int(args.checkpoint_frequency),
+        select_best_checkpoint=bool(args.select_best_checkpoint),
+        best_checkpoint_min_success_rate=float(args.best_checkpoint_min_success_rate),
+        reward_quality_deficit_weight=float(args.reward_quality_deficit_weight),
+        reward_delay_excess_weight=float(args.reward_delay_excess_weight),
+        reward_virtual_queue_weight=float(args.reward_virtual_queue_weight),
         bandwidth_hz=float(link.get("bandwidth_hz", DEFAULT_LINK_BANDWIDTH_HZ)),
         base_config=base_config,
         node_configs=_node_configs_from_payload(payload),
@@ -293,6 +308,17 @@ def _validate_settings(settings: PpoSmokeSettings) -> None:
         raise ValueError("--eval-frequency must be non-negative")
     if settings.checkpoint_frequency < 0:
         raise ValueError("--checkpoint-frequency must be non-negative")
+    if settings.select_best_checkpoint and settings.eval_frequency <= 0:
+        raise ValueError("--select-best-checkpoint requires --eval-frequency > 0")
+    if not 0.0 <= settings.best_checkpoint_min_success_rate <= 1.0:
+        raise ValueError("--best-checkpoint-min-success-rate must be in [0, 1]")
+    for name, value in (
+        ("--reward-quality-deficit-weight", settings.reward_quality_deficit_weight),
+        ("--reward-delay-excess-weight", settings.reward_delay_excess_weight),
+        ("--reward-virtual-queue-weight", settings.reward_virtual_queue_weight),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -373,6 +399,9 @@ def _make_env(
         config=bundle.config,
         node_configs=bundle.node_configs,
         link_trace=bundle.link_trace,
+        reward_quality_deficit_weight=settings.reward_quality_deficit_weight,
+        reward_delay_excess_weight=settings.reward_delay_excess_weight,
+        reward_virtual_queue_weight=settings.reward_virtual_queue_weight,
     )
 
 
@@ -394,6 +423,9 @@ class PpoDiagnosticsCallback(BaseCallback):
         self.scenario_name = scenario_name
         self.training_curve_rows: list[dict[str, object]] = []
         self.checkpoint_paths: list[Path] = []
+        self.best_model_path: Path | None = None
+        self.best_timestep: int | None = None
+        self.best_qoe_total: float | None = None
         self._next_eval_timestep = settings.eval_frequency if settings.eval_frequency > 0 else None
         self._next_checkpoint_timestep = (
             settings.checkpoint_frequency if settings.checkpoint_frequency > 0 else None
@@ -429,13 +461,17 @@ class PpoDiagnosticsCallback(BaseCallback):
         )
         result = _evaluate_ppo(self.model, eval_env)
         metrics = dict(result.metrics)
+        qoe_total = float(metrics.get("qoe_total", 0.0))
+        success_rate = float(metrics.get("success_rate", 0.0))
+        best_eligible = success_rate >= self.settings.best_checkpoint_min_success_rate
+        is_best = best_eligible and (self.best_qoe_total is None or qoe_total > self.best_qoe_total)
         row = {
             "seed": self.settings.seed,
             "scenario": self.scenario_name,
             "timestep": timestep,
-            "qoe_total": metrics.get("qoe_total", 0.0),
+            "qoe_total": qoe_total,
             "training_reward_total": eval_env.training_reward_total,
-            "success_rate": metrics.get("success_rate", 0.0),
+            "success_rate": success_rate,
             "semantic_success_rate": metrics.get("semantic_success_rate", 0.0),
             "mean_delay_ms": metrics.get("mean_delay_ms", 0.0),
             "total_energy_j": metrics.get("total_energy_j", 0.0),
@@ -448,7 +484,16 @@ class PpoDiagnosticsCallback(BaseCallback):
             "illegal_count": metrics.get("illegal_count", 0),
             "timeout_count": metrics.get("timeout_count", 0),
             "quality_violation_count": metrics.get("quality_violation_count", 0),
+            "best_checkpoint_eligible": best_eligible,
+            "selected_best_checkpoint": is_best,
         }
+        if is_best:
+            for existing in self.training_curve_rows:
+                existing["selected_best_checkpoint"] = False
+            self.best_qoe_total = qoe_total
+            self.best_timestep = timestep
+            self.best_model_path = self.settings.output_dir / "best_model.zip"
+            self.model.save(self.best_model_path)
         self.training_curve_rows.append(row)
         pd.DataFrame(self.training_curve_rows).to_csv(
             self.settings.output_dir / "training_curve.csv",
@@ -469,13 +514,33 @@ def _train_or_load_model(
     *,
     slot_count: int,
     scenario_name: str,
-) -> tuple[PPO, float, Mapping[str, object], Path, list[dict[str, object]], list[Path]]:
+) -> tuple[
+    PPO,
+    float,
+    Mapping[str, object],
+    Path,
+    list[dict[str, object]],
+    list[Path],
+    dict[str, object],
+]:
     hyperparameters = _settings_ppo_hyperparameters(settings)
     env = _make_env(profiles, settings, slot_count=slot_count, scenario_name=scenario_name)
     if settings.eval_only:
         model_path = settings.model_path or settings.output_dir / "model.zip"
         model = PPO.load(model_path, env=env, device="cpu")
-        return model, 0.0, hyperparameters, model_path, [], []
+        model_selection = {
+            "mode": "eval_only",
+            "select_best_checkpoint": settings.select_best_checkpoint,
+            "best_checkpoint_min_success_rate": settings.best_checkpoint_min_success_rate,
+            "selected_model": str(model_path.resolve()),
+            "selected_timestep": None,
+            "selected_qoe_total": None,
+            "best_model": None,
+            "best_timestep": None,
+            "best_qoe_total": None,
+            "final_model": None,
+        }
+        return model, 0.0, hyperparameters, model_path, [], [], model_selection
 
     model = PPO(
         "MlpPolicy",
@@ -493,14 +558,42 @@ def _train_or_load_model(
     started = time.perf_counter()
     model.learn(total_timesteps=settings.total_timesteps, callback=diagnostics)
     train_seconds = time.perf_counter() - started
-    model.save(settings.output_dir / "model")
+    final_model_path = settings.output_dir / "final_model.zip"
+    model.save(final_model_path)
+    selected_model_path = settings.output_dir / "model.zip"
+    selected_timestep = settings.total_timesteps
+    selected_qoe_total: float | None = None
+    selection_mode = "final"
+    if settings.select_best_checkpoint and diagnostics.best_model_path is not None:
+        model = PPO.load(diagnostics.best_model_path, env=env, device="cpu")
+        selected_timestep = int(diagnostics.best_timestep or settings.total_timesteps)
+        selected_qoe_total = diagnostics.best_qoe_total
+        selection_mode = "best_checkpoint"
+    elif settings.select_best_checkpoint:
+        selection_mode = "final_no_eligible_best_checkpoint"
+    model.save(selected_model_path)
+    model_selection = {
+        "mode": selection_mode,
+        "select_best_checkpoint": settings.select_best_checkpoint,
+        "best_checkpoint_min_success_rate": settings.best_checkpoint_min_success_rate,
+        "selected_model": str(selected_model_path.resolve()),
+        "selected_timestep": selected_timestep,
+        "selected_qoe_total": selected_qoe_total,
+        "best_model": (
+            None if diagnostics.best_model_path is None else str(diagnostics.best_model_path.resolve())
+        ),
+        "best_timestep": diagnostics.best_timestep,
+        "best_qoe_total": diagnostics.best_qoe_total,
+        "final_model": str(final_model_path.resolve()),
+    }
     return (
         model,
         train_seconds,
         hyperparameters,
-        settings.output_dir / "model.zip",
+        selected_model_path,
         diagnostics.training_curve_rows,
         diagnostics.checkpoint_paths,
+        model_selection,
     )
 
 
@@ -525,6 +618,7 @@ def _write_outputs(
     scenario_name: str,
     training_curve_rows: Sequence[Mapping[str, object]],
     checkpoint_paths: Sequence[Path],
+    model_selection: Mapping[str, object],
 ) -> dict[str, object]:
     all_results = [ppo_result, *baseline_results]
     metrics_rows = [result.metrics for result in all_results]
@@ -541,6 +635,7 @@ def _write_outputs(
     training_curve_path = settings.output_dir / "training_curve.csv"
     if training_curve_rows and not training_curve_path.is_file():
         pd.DataFrame(training_curve_rows).to_csv(training_curve_path, index=False)
+    training_figures = _write_training_diagnostic_figures(settings.output_dir, training_curve_rows)
 
     summary = {
         "purpose": "PPO smoke closure for the LEO semantic scheduling environment; not a formal paper result.",
@@ -562,11 +657,19 @@ def _write_outputs(
             "ppo_hyperparameters": dict(hyperparameters),
             "eval_frequency": settings.eval_frequency,
             "checkpoint_frequency": settings.checkpoint_frequency,
+            "select_best_checkpoint": settings.select_best_checkpoint,
+            "best_checkpoint_min_success_rate": settings.best_checkpoint_min_success_rate,
+            "reward_shaping": {
+                "quality_deficit_weight": settings.reward_quality_deficit_weight,
+                "delay_excess_weight": settings.reward_delay_excess_weight,
+                "virtual_queue_weight": settings.reward_virtual_queue_weight,
+            },
         },
         "runtime_seconds": train_seconds,
         "training_reward_total": ppo_result.metrics.get("training_reward_total", 0.0),
         "training_curve_rows": len(training_curve_rows),
         "checkpoint_count": len(checkpoint_paths),
+        "model_selection": dict(model_selection),
         "policy_metrics": metrics_rows,
         "outputs": {
             "model": str(model_path.resolve()),
@@ -577,6 +680,7 @@ def _write_outputs(
             "summary": str((settings.output_dir / "summary.json").resolve()),
             "training_curve": str(training_curve_path.resolve()) if training_curve_path.is_file() else None,
             "checkpoints": [str(path.resolve()) for path in checkpoint_paths],
+            "training_figures": {key: str(path.resolve()) for key, path in training_figures.items()},
         },
     }
     (settings.output_dir / "summary.json").write_text(
@@ -584,6 +688,92 @@ def _write_outputs(
         encoding="utf-8",
     )
     return summary
+
+
+def _write_training_diagnostic_figures(
+    output_dir: Path,
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, Path]:
+    if not rows:
+        return {}
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"Skipping training diagnostic figures because matplotlib is unavailable: {exc}")
+        return {}
+
+    frame = pd.DataFrame(rows).sort_values("timestep")
+    figure_dir = output_dir / "figures"
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    figures = {
+        "training_curve_qoe": figure_dir / "training_curve_qoe.png",
+        "training_curve_actions": figure_dir / "training_curve_actions.png",
+        "training_curve_violations": figure_dir / "training_curve_violations.png",
+        "training_curve_queues": figure_dir / "training_curve_queues.png",
+    }
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(frame["timestep"], frame["qoe_total"], marker="o", label="canonical QoE")
+    if "selected_best_checkpoint" in frame:
+        selected = frame[frame["selected_best_checkpoint"].astype(bool)]
+    else:
+        selected = frame.iloc[0:0]
+    if not selected.empty:
+        ax.scatter(selected["timestep"], selected["qoe_total"], marker="*", s=140, label="selected best")
+    ax.set_xlabel("PPO timesteps")
+    ax.set_ylabel("Canonical QoE")
+    ax.set_title("Evaluation QoE During Training")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(figures["training_curve_qoe"], dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for column, label in (
+        ("local_count", "local"),
+        ("offload_count", "offload"),
+        ("drop_count", "drop"),
+        ("illegal_count", "illegal"),
+    ):
+        if column in frame:
+            ax.plot(frame["timestep"], frame[column], marker="o", label=label)
+    ax.set_xlabel("PPO timesteps")
+    ax.set_ylabel("Count per evaluation")
+    ax.set_title("Action Mix During Training")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(figures["training_curve_actions"], dpi=180)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for column, label in (
+        ("illegal_count", "illegal"),
+        ("timeout_count", "timeout"),
+        ("quality_violation_count", "quality violation"),
+    ):
+        if column in frame:
+            ax.plot(frame["timestep"], frame[column], marker="o", label=label)
+    ax.set_xlabel("PPO timesteps")
+    ax.set_ylabel("Count per evaluation")
+    ax.set_title("Constraint Violations During Training")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(figures["training_curve_violations"], dpi=180)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].plot(frame["timestep"], frame["quality_virtual_queue"], marker="o", color="#4c78a8")
+    axes[0].set_xlabel("PPO timesteps")
+    axes[0].set_ylabel("Quality queue")
+    axes[0].set_title("Quality Virtual Queue")
+    axes[1].plot(frame["timestep"], frame["delay_virtual_queue_ms"], marker="o", color="#f58518")
+    axes[1].set_xlabel("PPO timesteps")
+    axes[1].set_ylabel("Delay queue ms")
+    axes[1].set_title("Delay Virtual Queue")
+    fig.tight_layout()
+    fig.savefig(figures["training_curve_queues"], dpi=180)
+    plt.close(fig)
+    return figures
 
 
 def _write_all_scenarios_outputs(
@@ -807,6 +997,7 @@ def main() -> int:
             model_path,
             training_curve_rows,
             checkpoint_paths,
+            model_selection,
         ) = _train_or_load_model(
             profiles,
             scenario_settings,
@@ -846,6 +1037,7 @@ def main() -> int:
                 scenario_name=scenario_name,
                 training_curve_rows=training_curve_rows,
                 checkpoint_paths=checkpoint_paths,
+                model_selection=model_selection,
             )
         )
 

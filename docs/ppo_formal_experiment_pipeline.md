@@ -50,6 +50,12 @@ Diagnostic pilot with training curves:
 F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --seeds 42 43 --limit-rois 128 --total-timesteps 1024 --eval-frequency 256 --ppo-ent-coef 0.01 --output-dir outputs\rl\ppo_diagnostic_pilot --exist-ok
 ```
 
+Constraint-shaping diagnostic pilot:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --seeds 42 43 --limit-rois 128 --total-timesteps 2048 --eval-frequency 256 --checkpoint-frequency 512 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_constraint_diagnostic --exist-ok
+```
+
 ## Outputs
 
 ```text
@@ -66,6 +72,9 @@ outputs/rl/ppo_formal/figures/qoe_by_policy.png
 outputs/rl/ppo_formal/figures/qoe_by_scenario_policy.png
 outputs/rl/ppo_formal/figures/qoe_cdf_by_policy.png
 outputs/rl/ppo_formal/figures/training_curve_qoe.png
+outputs/rl/ppo_formal/figures/training_curve_actions.png
+outputs/rl/ppo_formal/figures/training_curve_violations.png
+outputs/rl/ppo_formal/figures/training_curve_queues.png
 ```
 
 The aggregate reports use canonical slot-level `qoe_total`, not the PPO
@@ -76,6 +85,17 @@ The formal runner passes through PPO overrides such as `--ppo-ent-coef` and
 diagnostic controls such as `--eval-frequency` and `--checkpoint-frequency`.
 When evaluation frequency is enabled, `training_curve_all.csv` aggregates
 per-seed/per-scenario canonical QoE curves.
+
+`--select-best-checkpoint` passes through to the smoke runner and selects the
+best canonical evaluation checkpoint for final PPO-vs-baseline comparison.
+Use `--best-checkpoint-min-success-rate` to prevent all-drop or otherwise
+degenerate policies from being selected only because their delay and energy
+costs are near zero.
+The optional `--reward-quality-deficit-weight`,
+`--reward-delay-excess-weight`, and `--reward-virtual-queue-weight` parameters
+shape only the PPO training reward. The aggregate reports still rank policies
+with canonical `qoe_total`, so shaped runs should be labeled as diagnostic or
+ablation runs rather than mixed silently with unshaped formal results.
 
 ## Current Scope
 

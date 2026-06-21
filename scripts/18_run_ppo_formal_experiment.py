@@ -71,6 +71,11 @@ class FormalExperimentSettings:
     ppo_ent_coef: float | None
     eval_frequency: int
     checkpoint_frequency: int
+    select_best_checkpoint: bool
+    best_checkpoint_min_success_rate: float
+    reward_quality_deficit_weight: float
+    reward_delay_excess_weight: float
+    reward_virtual_queue_weight: float
     exist_ok: bool
     dry_run: bool
     skip_plots: bool
@@ -97,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-ent-coef", type=float)
     parser.add_argument("--eval-frequency", type=int, default=0)
     parser.add_argument("--checkpoint-frequency", type=int, default=0)
+    parser.add_argument("--select-best-checkpoint", action="store_true")
+    parser.add_argument("--best-checkpoint-min-success-rate", type=float, default=0.0)
+    parser.add_argument("--reward-quality-deficit-weight", type=float, default=0.0)
+    parser.add_argument("--reward-delay-excess-weight", type=float, default=0.0)
+    parser.add_argument("--reward-virtual-queue-weight", type=float, default=0.0)
     parser.add_argument("--exist-ok", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
@@ -124,6 +134,11 @@ def _resolve_settings(args: argparse.Namespace) -> FormalExperimentSettings:
         ppo_ent_coef=args.ppo_ent_coef,
         eval_frequency=int(args.eval_frequency),
         checkpoint_frequency=int(args.checkpoint_frequency),
+        select_best_checkpoint=bool(args.select_best_checkpoint),
+        best_checkpoint_min_success_rate=float(args.best_checkpoint_min_success_rate),
+        reward_quality_deficit_weight=float(args.reward_quality_deficit_weight),
+        reward_delay_excess_weight=float(args.reward_delay_excess_weight),
+        reward_virtual_queue_weight=float(args.reward_virtual_queue_weight),
         exist_ok=bool(args.exist_ok),
         dry_run=bool(args.dry_run),
         skip_plots=bool(args.skip_plots),
@@ -167,6 +182,17 @@ def _validate_settings(settings: FormalExperimentSettings) -> None:
         raise ValueError("--eval-frequency must be non-negative")
     if settings.checkpoint_frequency < 0:
         raise ValueError("--checkpoint-frequency must be non-negative")
+    if settings.select_best_checkpoint and settings.eval_frequency <= 0:
+        raise ValueError("--select-best-checkpoint requires --eval-frequency > 0")
+    if not 0.0 <= settings.best_checkpoint_min_success_rate <= 1.0:
+        raise ValueError("--best-checkpoint-min-success-rate must be in [0, 1]")
+    for name, value in (
+        ("--reward-quality-deficit-weight", settings.reward_quality_deficit_weight),
+        ("--reward-delay-excess-weight", settings.reward_delay_excess_weight),
+        ("--reward-virtual-queue-weight", settings.reward_virtual_queue_weight),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -208,6 +234,8 @@ def _build_seed_command(settings: FormalExperimentSettings, seed: int) -> list[s
         "--all-scenarios",
         "--exist-ok",
     ]
+    if settings.select_best_checkpoint:
+        command.append("--select-best-checkpoint")
     optional_args: list[tuple[str, object | None]] = [
         ("--config", settings.config),
         ("--profile-csv", settings.profile_csv),
@@ -226,6 +254,15 @@ def _build_seed_command(settings: FormalExperimentSettings, seed: int) -> list[s
             "--checkpoint-frequency",
             settings.checkpoint_frequency if settings.checkpoint_frequency > 0 else None,
         ),
+        (
+            "--best-checkpoint-min-success-rate",
+            settings.best_checkpoint_min_success_rate
+            if settings.select_best_checkpoint or settings.best_checkpoint_min_success_rate > 0
+            else None,
+        ),
+        ("--reward-quality-deficit-weight", settings.reward_quality_deficit_weight),
+        ("--reward-delay-excess-weight", settings.reward_delay_excess_weight),
+        ("--reward-virtual-queue-weight", settings.reward_virtual_queue_weight),
     ]
     for flag, value in optional_args:
         if value is not None:
@@ -414,6 +451,8 @@ def _write_formal_outputs(
             "scenarios": list(SCENARIO_NAMES),
             "eval_frequency": settings.eval_frequency,
             "checkpoint_frequency": settings.checkpoint_frequency,
+            "select_best_checkpoint": settings.select_best_checkpoint,
+            "best_checkpoint_min_success_rate": settings.best_checkpoint_min_success_rate,
             "ppo_overrides": {
                 "n_steps": settings.ppo_n_steps,
                 "batch_size": settings.ppo_batch_size,
@@ -421,6 +460,11 @@ def _write_formal_outputs(
                 "learning_rate": settings.ppo_learning_rate,
                 "gamma": settings.ppo_gamma,
                 "ent_coef": settings.ppo_ent_coef,
+            },
+            "reward_shaping": {
+                "quality_deficit_weight": settings.reward_quality_deficit_weight,
+                "delay_excess_weight": settings.reward_delay_excess_weight,
+                "virtual_queue_weight": settings.reward_virtual_queue_weight,
             },
         },
         "seed_runs": [
@@ -462,6 +506,9 @@ def _write_figures(
     }
     if aggregate["training_curve"]:
         figures["figure_training_curve_qoe"] = figure_dir / "training_curve_qoe.png"
+        figures["figure_training_curve_actions"] = figure_dir / "training_curve_actions.png"
+        figures["figure_training_curve_violations"] = figure_dir / "training_curve_violations.png"
+        figures["figure_training_curve_queues"] = figure_dir / "training_curve_queues.png"
 
     policy_rows = aggregate["policy_formal_aggregate"]
     policies = [str(row["policy"]) for row in policy_rows]
@@ -517,6 +564,62 @@ def _write_figures(
         ax.legend(fontsize=8)
         fig.tight_layout()
         fig.savefig(figures["figure_training_curve_qoe"], dpi=180)
+        plt.close(fig)
+
+        action_columns = ("local_count", "offload_count", "drop_count", "illegal_count")
+        action_grouped = (
+            curve.groupby("timestep", as_index=False)[list(action_columns)]
+            .mean()
+            .sort_values("timestep")
+        )
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for column in action_columns:
+            ax.plot(action_grouped["timestep"], action_grouped[column], marker="o", label=column)
+        ax.set_xlabel("PPO timesteps")
+        ax.set_ylabel("Mean count per evaluation")
+        ax.set_title("Aggregate Action Mix During Training")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(figures["figure_training_curve_actions"], dpi=180)
+        plt.close(fig)
+
+        violation_columns = ("illegal_count", "timeout_count", "quality_violation_count")
+        violation_grouped = (
+            curve.groupby(["scenario", "timestep"], as_index=False)[list(violation_columns)]
+            .mean()
+            .sort_values(["scenario", "timestep"])
+        )
+        fig, axes = plt.subplots(1, len(violation_columns), figsize=(15, 4), sharex=True)
+        for ax, column in zip(axes, violation_columns):
+            for scenario, group in violation_grouped.groupby("scenario"):
+                ax.plot(group["timestep"], group[column], marker="o", label=str(scenario))
+            ax.set_title(column)
+            ax.set_xlabel("Timesteps")
+            ax.set_ylabel("Mean count")
+        axes[0].legend(fontsize=7)
+        fig.tight_layout()
+        fig.savefig(figures["figure_training_curve_violations"], dpi=180)
+        plt.close(fig)
+
+        queue_columns = ("quality_virtual_queue", "delay_virtual_queue_ms")
+        queue_grouped = (
+            curve.groupby(["scenario", "timestep"], as_index=False)[list(queue_columns)]
+            .mean()
+            .sort_values(["scenario", "timestep"])
+        )
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharex=True)
+        for scenario, group in queue_grouped.groupby("scenario"):
+            axes[0].plot(group["timestep"], group["quality_virtual_queue"], marker="o", label=str(scenario))
+            axes[1].plot(group["timestep"], group["delay_virtual_queue_ms"], marker="o", label=str(scenario))
+        axes[0].set_title("Quality Virtual Queue")
+        axes[0].set_xlabel("Timesteps")
+        axes[0].set_ylabel("Mean queue")
+        axes[1].set_title("Delay Virtual Queue")
+        axes[1].set_xlabel("Timesteps")
+        axes[1].set_ylabel("Mean queue ms")
+        axes[0].legend(fontsize=7)
+        fig.tight_layout()
+        fig.savefig(figures["figure_training_curve_queues"], dpi=180)
         plt.close(fig)
     return figures
 

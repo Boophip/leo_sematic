@@ -114,17 +114,30 @@ class LeoSchedulingEnv(gym.Env):
         node_configs: Sequence[SatelliteNodeConfig],
         link_trace: Mapping[int, Mapping[str, LinkState]],
         target_nodes: Sequence[str] | None = None,
+        reward_quality_deficit_weight: float = 0.0,
+        reward_delay_excess_weight: float = 0.0,
+        reward_virtual_queue_weight: float = 0.0,
     ) -> None:
         super().__init__()
         if config.rois_per_slot <= 0:
             raise ValueError("rois_per_slot must be positive")
         if not profiles.roi_order:
             raise ValueError("profiles must contain at least one ROI")
+        for name, value in (
+            ("reward_quality_deficit_weight", reward_quality_deficit_weight),
+            ("reward_delay_excess_weight", reward_delay_excess_weight),
+            ("reward_virtual_queue_weight", reward_virtual_queue_weight),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
 
         self.profiles = profiles
         self.config = config
         self.node_configs = tuple(node_configs)
         self.link_trace = {int(slot): dict(links) for slot, links in link_trace.items()}
+        self.reward_quality_deficit_weight = float(reward_quality_deficit_weight)
+        self.reward_delay_excess_weight = float(reward_delay_excess_weight)
+        self.reward_virtual_queue_weight = float(reward_virtual_queue_weight)
         if SOURCE_NODE not in {node.name for node in self.node_configs}:
             raise ValueError(f"node_configs must include {SOURCE_NODE!r}")
 
@@ -212,6 +225,7 @@ class LeoSchedulingEnv(gym.Env):
                 self._slot_success_value.get(roi.grid_id, 0.0) + roi.semantic_value
             )
 
+        constraint_reward_penalty = self._constraint_reward_penalty(decision)
         reward = self._decision_reward(decision)
         self.current_index += 1
         slot_ended = self._slot_completed(slot_index)
@@ -235,6 +249,9 @@ class LeoSchedulingEnv(gym.Env):
                 "training_reward_total": self.training_reward_total,
                 "quality_virtual_queue": self.quality_virtual_queue,
                 "delay_virtual_queue_ms": self.delay_virtual_queue_ms,
+                "quality_deficit": self._quality_deficit(decision),
+                "delay_excess_ms": self._delay_excess_ms(decision),
+                "constraint_reward_penalty": constraint_reward_penalty,
                 "action_index": action_index,
                 "action_label": spec.label,
             }
@@ -410,7 +427,35 @@ class LeoSchedulingEnv(gym.Env):
             reward -= self.config.timeout_penalty
         if decision.quality_violation:
             reward -= self.config.quality_penalty
+        reward -= self._constraint_reward_penalty(decision)
         return reward
+
+    def _constraint_reward_penalty(self, decision: DecisionResult) -> float:
+        quality_deficit = self._quality_deficit(decision)
+        delay_excess_norm = _safe_div(self._delay_excess_ms(decision), max(self.config.deadline_ms, 1.0))
+        quality_queue_pressure = _safe_div(
+            self.quality_virtual_queue,
+            max(self.config.rois_per_slot * max(self.config.quality_threshold, 1.0), 1.0),
+        )
+        delay_queue_pressure = _safe_div(
+            self.delay_virtual_queue_ms,
+            max(self.config.rois_per_slot * max(self.config.deadline_ms, 1.0), 1.0),
+        )
+        return (
+            self.reward_quality_deficit_weight * quality_deficit
+            + self.reward_delay_excess_weight * delay_excess_norm
+            + self.reward_virtual_queue_weight
+            * (
+                quality_queue_pressure * quality_deficit
+                + delay_queue_pressure * delay_excess_norm
+            )
+        )
+
+    def _quality_deficit(self, decision: DecisionResult) -> float:
+        return max(self.config.quality_threshold - decision.predicted_quality, 0.0)
+
+    def _delay_excess_ms(self, decision: DecisionResult) -> float:
+        return max(decision.total_delay_ms - self.config.deadline_ms, 0.0)
 
     def _finish_slot(self, slot_index: int) -> SlotSummary:
         for name, state in self.node_states.items():

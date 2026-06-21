@@ -58,6 +58,9 @@ def _env(
     visible: bool = True,
     rois_per_slot: int = 2,
     deadline_ms: float = 100.0,
+    reward_quality_deficit_weight: float = 0.0,
+    reward_delay_excess_weight: float = 0.0,
+    reward_virtual_queue_weight: float = 0.0,
 ) -> LeoSchedulingEnv:
     table = ActionProfileTable.from_frame(_profile_frame())
     return LeoSchedulingEnv(
@@ -76,6 +79,9 @@ def _env(
             0: {"sat_1": LinkState(visible=visible, snr_db=18.0, bandwidth_hz=10e6)},
             1: {"sat_1": LinkState(visible=visible, snr_db=18.0, bandwidth_hz=10e6)},
         },
+        reward_quality_deficit_weight=reward_quality_deficit_weight,
+        reward_delay_excess_weight=reward_delay_excess_weight,
+        reward_virtual_queue_weight=reward_virtual_queue_weight,
     )
 
 
@@ -221,6 +227,37 @@ class LeoSchedulingEnvTests(unittest.TestCase):
         env.step(env.action_index(kind="local", exit_level=2, compression_level="local"))
 
         self.assertNotAlmostEqual(env.training_reward_total, env.metrics()["qoe_total"])
+
+    def test_constraint_reward_shaping_is_optional_and_penalizes_quality_deficit(self) -> None:
+        default_env = _env(rois_per_slot=2)
+        default_env.reset()
+        _, default_reward, _, _, default_info = default_env.step(default_env.action_index(kind="drop"))
+
+        shaped_env = _env(rois_per_slot=2, reward_quality_deficit_weight=2.0)
+        shaped_env.reset()
+        _, shaped_reward, _, _, shaped_info = shaped_env.step(shaped_env.action_index(kind="drop"))
+
+        self.assertEqual(default_info["constraint_reward_penalty"], 0.0)
+        self.assertAlmostEqual(shaped_info["quality_deficit"], shaped_env.config.quality_threshold)
+        self.assertGreater(shaped_info["constraint_reward_penalty"], 0.0)
+        self.assertLess(shaped_reward, default_reward)
+
+    def test_constraint_reward_shaping_penalizes_deadline_excess(self) -> None:
+        default_env = _env(rois_per_slot=1, deadline_ms=5.0)
+        default_env.reset()
+        _, default_reward, _, _, default_info = default_env.step(
+            default_env.action_index(kind="local", exit_level=2, compression_level="local")
+        )
+
+        shaped_env = _env(rois_per_slot=1, deadline_ms=5.0, reward_delay_excess_weight=1.0)
+        shaped_env.reset()
+        _, shaped_reward, _, _, shaped_info = shaped_env.step(
+            shaped_env.action_index(kind="local", exit_level=2, compression_level="local")
+        )
+
+        self.assertGreater(shaped_info["delay_excess_ms"], 0.0)
+        self.assertGreater(shaped_info["constraint_reward_penalty"], default_info["constraint_reward_penalty"])
+        self.assertLess(shaped_reward, default_reward)
 
     def test_canonical_qoe_applies_constraint_penalties(self) -> None:
         env = _env(visible=False, rois_per_slot=1)
