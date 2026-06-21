@@ -19,7 +19,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.envs import LeoSchedulingEnv  # noqa: E402
+from src.envs import CANDIDATE_MODE_FIXED, CANDIDATE_MODES, LeoSchedulingEnv  # noqa: E402
 from src.simulation.episode import (  # noqa: E402
     DEFAULT_LINK_BANDWIDTH_HZ,
     SCENARIO_NAMES,
@@ -110,6 +110,8 @@ class PpoSmokeSettings:
     reward_quality_deficit_weight: float
     reward_delay_excess_weight: float
     reward_virtual_queue_weight: float
+    candidate_mode: str
+    candidate_top_k: int
     bandwidth_hz: float
     base_config: SimulationConfig
     node_configs: tuple[SatelliteNodeConfig, ...]
@@ -145,6 +147,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-quality-deficit-weight", type=float, default=0.0)
     parser.add_argument("--reward-delay-excess-weight", type=float, default=0.0)
     parser.add_argument("--reward-virtual-queue-weight", type=float, default=0.0)
+    parser.add_argument("--candidate-mode", choices=CANDIDATE_MODES, default=CANDIDATE_MODE_FIXED)
+    parser.add_argument("--candidate-top-k", type=int, default=12)
     parser.add_argument("--exist-ok", action="store_true")
     return parser.parse_args()
 
@@ -233,6 +237,8 @@ def _resolve_settings(args: argparse.Namespace) -> PpoSmokeSettings:
         reward_quality_deficit_weight=float(args.reward_quality_deficit_weight),
         reward_delay_excess_weight=float(args.reward_delay_excess_weight),
         reward_virtual_queue_weight=float(args.reward_virtual_queue_weight),
+        candidate_mode=str(args.candidate_mode),
+        candidate_top_k=int(args.candidate_top_k),
         bandwidth_hz=float(link.get("bandwidth_hz", DEFAULT_LINK_BANDWIDTH_HZ)),
         base_config=base_config,
         node_configs=_node_configs_from_payload(payload),
@@ -319,6 +325,10 @@ def _validate_settings(settings: PpoSmokeSettings) -> None:
     ):
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
+    if settings.candidate_mode not in CANDIDATE_MODES:
+        raise ValueError(f"--candidate-mode must be one of {CANDIDATE_MODES}")
+    if settings.candidate_top_k <= 0:
+        raise ValueError("--candidate-top-k must be positive")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -402,6 +412,8 @@ def _make_env(
         reward_quality_deficit_weight=settings.reward_quality_deficit_weight,
         reward_delay_excess_weight=settings.reward_delay_excess_weight,
         reward_virtual_queue_weight=settings.reward_virtual_queue_weight,
+        candidate_mode=settings.candidate_mode,
+        candidate_top_k=settings.candidate_top_k,
     )
 
 
@@ -482,6 +494,9 @@ class PpoDiagnosticsCallback(BaseCallback):
             "offload_count": metrics.get("offload_count", 0),
             "drop_count": metrics.get("drop_count", 0),
             "illegal_count": metrics.get("illegal_count", 0),
+            "executed_illegal_count": metrics.get("executed_illegal_count", 0),
+            "candidate_remap_count": metrics.get("candidate_remap_count", 0),
+            "mean_candidate_count": metrics.get("mean_candidate_count", 0.0),
             "timeout_count": metrics.get("timeout_count", 0),
             "quality_violation_count": metrics.get("quality_violation_count", 0),
             "best_checkpoint_eligible": best_eligible,
@@ -664,6 +679,11 @@ def _write_outputs(
                 "delay_excess_weight": settings.reward_delay_excess_weight,
                 "virtual_queue_weight": settings.reward_virtual_queue_weight,
             },
+            "candidate_actions": {
+                "mode": settings.candidate_mode,
+                "top_k": settings.candidate_top_k,
+                "note": "Raw PPO actions are modulo-remapped only when candidate mode is not fixed.",
+            },
         },
         "runtime_seconds": train_seconds,
         "training_reward_total": ppo_result.metrics.get("training_reward_total", 0.0),
@@ -734,6 +754,7 @@ def _write_training_diagnostic_figures(
         ("offload_count", "offload"),
         ("drop_count", "drop"),
         ("illegal_count", "illegal"),
+        ("candidate_remap_count", "remapped"),
     ):
         if column in frame:
             ax.plot(frame["timestep"], frame[column], marker="o", label=label)

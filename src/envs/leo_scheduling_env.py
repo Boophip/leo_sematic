@@ -50,6 +50,14 @@ EXIT_LEVELS = (1, 2, 3, 4)
 OFFLOAD_COMPRESSION_LEVELS = ("beta_0", "beta_1", "beta_2", "beta_3")
 ACTION_FEATURES = ("legal", "quality", "delay", "bytes")
 EMPTY_EVALUATION = TaskEvaluation(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+CANDIDATE_MODE_FIXED = "fixed"
+CANDIDATE_MODE_LEGAL = "legal"
+CANDIDATE_MODE_FEASIBLE_TOPK = "feasible-topk"
+CANDIDATE_MODES = (
+    CANDIDATE_MODE_FIXED,
+    CANDIDATE_MODE_LEGAL,
+    CANDIDATE_MODE_FEASIBLE_TOPK,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,21 @@ class FixedActionSpec:
             exit_level=self.exit_level,
             compression_level=self.compression_level,
         )
+
+
+@dataclass(frozen=True)
+class CandidateActionSelection:
+    """Raw PPO action remapped to the current physical candidate set."""
+
+    raw_action_index: int
+    mapped_action_index: int
+    candidate_indices: tuple[int, ...]
+    candidate_labels: str
+    candidate_remapped: bool
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.candidate_indices)
 
 
 def build_fixed_action_space(target_nodes: Sequence[str]) -> tuple[FixedActionSpec, ...]:
@@ -117,6 +140,8 @@ class LeoSchedulingEnv(gym.Env):
         reward_quality_deficit_weight: float = 0.0,
         reward_delay_excess_weight: float = 0.0,
         reward_virtual_queue_weight: float = 0.0,
+        candidate_mode: str = CANDIDATE_MODE_FIXED,
+        candidate_top_k: int = 12,
     ) -> None:
         super().__init__()
         if config.rois_per_slot <= 0:
@@ -130,6 +155,10 @@ class LeoSchedulingEnv(gym.Env):
         ):
             if value < 0:
                 raise ValueError(f"{name} must be non-negative")
+        if candidate_mode not in CANDIDATE_MODES:
+            raise ValueError(f"candidate_mode must be one of {CANDIDATE_MODES}")
+        if candidate_top_k <= 0:
+            raise ValueError("candidate_top_k must be positive")
 
         self.profiles = profiles
         self.config = config
@@ -138,6 +167,8 @@ class LeoSchedulingEnv(gym.Env):
         self.reward_quality_deficit_weight = float(reward_quality_deficit_weight)
         self.reward_delay_excess_weight = float(reward_delay_excess_weight)
         self.reward_virtual_queue_weight = float(reward_virtual_queue_weight)
+        self.candidate_mode = candidate_mode
+        self.candidate_top_k = int(candidate_top_k)
         if SOURCE_NODE not in {node.name for node in self.node_configs}:
             raise ValueError(f"node_configs must include {SOURCE_NODE!r}")
 
@@ -214,8 +245,15 @@ class LeoSchedulingEnv(gym.Env):
         roi_id = self._current_roi_id()
         roi = self.profiles.roi(roi_id)
         links = self._links_for_slot(slot_index)
-        spec = self.action_specs[action_index]
-        decision = self._evaluate_action(spec.to_action(), roi, slot_index, links)
+        selection = self._select_candidate_action(action_index, roi_id, links)
+        spec = self.action_specs[selection.mapped_action_index]
+        decision = self._evaluate_action(
+            spec.to_action(),
+            roi,
+            slot_index,
+            links,
+            selection=selection,
+        )
         self.decisions.append(decision)
         self._slot_total_value[roi.grid_id] = (
             self._slot_total_value.get(roi.grid_id, 0.0) + roi.semantic_value
@@ -252,7 +290,7 @@ class LeoSchedulingEnv(gym.Env):
                 "quality_deficit": self._quality_deficit(decision),
                 "delay_excess_ms": self._delay_excess_ms(decision),
                 "constraint_reward_penalty": constraint_reward_penalty,
-                "action_index": action_index,
+                "action_index": selection.mapped_action_index,
                 "action_label": spec.label,
             }
         )
@@ -303,6 +341,7 @@ class LeoSchedulingEnv(gym.Env):
         roi,
         slot_index: int,
         links: Mapping[str, LinkState],
+        selection: CandidateActionSelection | None = None,
     ) -> DecisionResult:
         if action.kind == DROP_ACTION:
             return self._decision_from_evaluation(
@@ -312,6 +351,7 @@ class LeoSchedulingEnv(gym.Env):
                 profile=None,
                 evaluation=EMPTY_EVALUATION,
                 illegal=False,
+                selection=selection,
             )
 
         profile = self._profile_for_action(roi.roi_id, action)
@@ -323,6 +363,7 @@ class LeoSchedulingEnv(gym.Env):
                 profile=profile,
                 evaluation=EMPTY_EVALUATION,
                 illegal=True,
+                selection=selection,
             )
 
         target_node = SOURCE_NODE if action.kind == LOCAL_ACTION else action.target_node
@@ -345,6 +386,7 @@ class LeoSchedulingEnv(gym.Env):
                 profile=profile,
                 evaluation=EMPTY_EVALUATION,
                 illegal=True,
+                selection=selection,
             )
 
         self.pending_cycles[target_node] += evaluation.task_cycles
@@ -355,6 +397,7 @@ class LeoSchedulingEnv(gym.Env):
             profile=profile,
             evaluation=evaluation,
             illegal=False,
+            selection=selection,
         )
 
     def _decision_from_evaluation(
@@ -366,7 +409,16 @@ class LeoSchedulingEnv(gym.Env):
         profile: ActionProfile | None,
         evaluation: TaskEvaluation,
         illegal: bool,
+        selection: CandidateActionSelection | None = None,
     ) -> DecisionResult:
+        if selection is None:
+            selection = CandidateActionSelection(
+                raw_action_index=-1,
+                mapped_action_index=-1,
+                candidate_indices=(),
+                candidate_labels="",
+                candidate_remapped=False,
+            )
         predicted_quality = 0.0 if profile is None or illegal else profile.predicted_quality
         true_quality = 0.0 if profile is None or illegal else profile.task_quality
         timeout = (
@@ -407,6 +459,100 @@ class LeoSchedulingEnv(gym.Env):
             timeout=timeout,
             quality_violation=quality_violation,
             illegal=illegal,
+            raw_action_index=selection.raw_action_index,
+            mapped_action_index=selection.mapped_action_index,
+            candidate_mode=self.candidate_mode,
+            candidate_count=selection.candidate_count,
+            candidate_labels=selection.candidate_labels,
+            candidate_remapped=selection.candidate_remapped,
+        )
+
+    def _select_candidate_action(
+        self,
+        raw_action_index: int,
+        roi_id: str,
+        links: Mapping[str, LinkState],
+    ) -> CandidateActionSelection:
+        candidate_indices = self._candidate_action_indices(roi_id, links)
+        if self.candidate_mode == CANDIDATE_MODE_FIXED:
+            mapped_action_index = raw_action_index
+        else:
+            mapped_action_index = candidate_indices[raw_action_index % len(candidate_indices)]
+        candidate_labels = "|".join(self.action_specs[index].label for index in candidate_indices)
+        return CandidateActionSelection(
+            raw_action_index=raw_action_index,
+            mapped_action_index=mapped_action_index,
+            candidate_indices=candidate_indices,
+            candidate_labels=candidate_labels,
+            candidate_remapped=raw_action_index != mapped_action_index,
+        )
+
+    def _candidate_action_indices(
+        self,
+        roi_id: str,
+        links: Mapping[str, LinkState],
+    ) -> tuple[int, ...]:
+        if self.candidate_mode == CANDIDATE_MODE_FIXED:
+            return tuple(range(len(self.action_specs)))
+
+        legal_indices = self._legal_action_indices(roi_id, links)
+        if self.candidate_mode == CANDIDATE_MODE_LEGAL:
+            return legal_indices
+
+        drop_index = next(
+            (index for index in legal_indices if self.action_specs[index].kind == DROP_ACTION),
+            0,
+        )
+        ranked_non_drop = sorted(
+            (index for index in legal_indices if self.action_specs[index].kind != DROP_ACTION),
+            key=lambda index: self._candidate_priority(index, roi_id, links),
+            reverse=True,
+        )
+        return (drop_index, *ranked_non_drop[: self.candidate_top_k])
+
+    def _legal_action_indices(
+        self,
+        roi_id: str,
+        links: Mapping[str, LinkState],
+    ) -> tuple[int, ...]:
+        indices: list[int] = []
+        for index, spec in enumerate(self.action_specs):
+            action = spec.to_action()
+            if action.kind == DROP_ACTION:
+                indices.append(index)
+                continue
+            profile = self._profile_for_action(roi_id, action)
+            if profile is not None and self._is_action_legal(action, profile, links):
+                indices.append(index)
+        return tuple(indices) if indices else (0,)
+
+    def _candidate_priority(
+        self,
+        action_index: int,
+        roi_id: str,
+        links: Mapping[str, LinkState],
+    ) -> tuple[float, float, float, float, int]:
+        spec = self.action_specs[action_index]
+        action = spec.to_action()
+        profile = self._profile_for_action(roi_id, action)
+        if profile is None:
+            return (-1.0, 0.0, -1.0, 0.0, -action_index)
+        delay_ms = self._delay_proxy_ms(action, profile, links)
+        if not np.isfinite(delay_ms):
+            delay_ms = self.config.deadline_ms * 2.0
+        delay_norm = _safe_div(delay_ms, max(self.config.deadline_ms, 1.0))
+        bytes_norm = _safe_div(profile.compressed_bytes, 500_000.0)
+        score = (
+            profile.predicted_quality
+            - self.config.delay_weight * delay_norm
+            - 0.05 * bytes_norm
+        )
+        return (
+            score,
+            profile.predicted_quality,
+            -delay_norm,
+            -bytes_norm,
+            -action_index,
         )
 
     def _decision_reward(self, decision: DecisionResult) -> float:

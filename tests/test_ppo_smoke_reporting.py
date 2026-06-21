@@ -103,6 +103,8 @@ class PpoSmokeReportingTests(unittest.TestCase):
             reward_quality_deficit_weight=0.0,
             reward_delay_excess_weight=0.0,
             reward_virtual_queue_weight=0.0,
+            candidate_mode="fixed",
+            candidate_top_k=12,
             bandwidth_hz=runner.DEFAULT_LINK_BANDWIDTH_HZ,
             base_config=runner.SimulationConfig(),
             node_configs=runner.default_node_configs(),
@@ -111,6 +113,69 @@ class PpoSmokeReportingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "--select-best-checkpoint"):
             runner._validate_settings(settings)
+
+    def test_candidate_top_k_must_be_positive(self) -> None:
+        runner = _load_runner_module()
+        settings = runner.PpoSmokeSettings(
+            config_path=None,
+            config_loaded=False,
+            profile_csv=Path(__file__),
+            quality_proxy=Path(__file__),
+            output_dir=ROOT / "outputs" / "rl" / "tmp_smoke_test",
+            limit_rois=64,
+            total_timesteps=128,
+            seed=42,
+            scenario="default",
+            all_scenarios=False,
+            eval_only=False,
+            model_path=None,
+            exist_ok=True,
+            ppo_n_steps=None,
+            ppo_batch_size=None,
+            ppo_n_epochs=None,
+            ppo_learning_rate=None,
+            ppo_gamma=None,
+            ppo_ent_coef=None,
+            eval_frequency=0,
+            checkpoint_frequency=0,
+            select_best_checkpoint=False,
+            best_checkpoint_min_success_rate=0.0,
+            reward_quality_deficit_weight=0.0,
+            reward_delay_excess_weight=0.0,
+            reward_virtual_queue_weight=0.0,
+            candidate_mode="feasible-topk",
+            candidate_top_k=0,
+            bandwidth_hz=runner.DEFAULT_LINK_BANDWIDTH_HZ,
+            base_config=runner.SimulationConfig(),
+            node_configs=runner.default_node_configs(),
+            policy_names=(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "--candidate-top-k"):
+            runner._validate_settings(settings)
+
+    def test_training_curve_records_candidate_diagnostics(self) -> None:
+        runner = _load_runner_module()
+        rows = [
+            {
+                "timestep": 128,
+                "qoe_total": 1.0,
+                "local_count": 1,
+                "offload_count": 2,
+                "drop_count": 3,
+                "illegal_count": 0,
+                "candidate_remap_count": 4,
+                "quality_virtual_queue": 0.0,
+                "delay_virtual_queue_ms": 0.0,
+            }
+        ]
+
+        figures = runner._write_training_diagnostic_figures(
+            ROOT / "outputs" / "rl" / "tmp_smoke_test_figures",
+            rows,
+        )
+
+        self.assertIn("training_curve_actions", figures)
 
 
 def _metric_row(scenario: str, policy: str, qoe: float, *, delay_ms: float) -> dict[str, object]:

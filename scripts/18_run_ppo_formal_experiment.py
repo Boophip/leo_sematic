@@ -16,6 +16,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.envs import CANDIDATE_MODE_FIXED, CANDIDATE_MODES  # noqa: E402
 from src.simulation.episode import SCENARIO_NAMES  # noqa: E402
 
 
@@ -37,6 +38,9 @@ POLICY_FORMAL_COLUMNS = (
     ("mean_delay_ms", "Mean Delay ms"),
     ("mean_total_energy_j", "Mean Energy J"),
     ("mean_total_aosi_cost", "Mean AoSI Cost"),
+    ("mean_candidate_remap_count", "Mean Remaps"),
+    ("mean_candidate_count", "Mean Candidates"),
+    ("mean_executed_illegal_count", "Executed Illegal"),
 )
 SCENARIO_FORMAL_COLUMNS = (
     ("scenario", "Scenario"),
@@ -76,6 +80,8 @@ class FormalExperimentSettings:
     reward_quality_deficit_weight: float
     reward_delay_excess_weight: float
     reward_virtual_queue_weight: float
+    candidate_mode: str
+    candidate_top_k: int
     exist_ok: bool
     dry_run: bool
     skip_plots: bool
@@ -107,6 +113,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-quality-deficit-weight", type=float, default=0.0)
     parser.add_argument("--reward-delay-excess-weight", type=float, default=0.0)
     parser.add_argument("--reward-virtual-queue-weight", type=float, default=0.0)
+    parser.add_argument("--candidate-mode", choices=CANDIDATE_MODES, default=CANDIDATE_MODE_FIXED)
+    parser.add_argument("--candidate-top-k", type=int, default=12)
     parser.add_argument("--exist-ok", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
@@ -139,6 +147,8 @@ def _resolve_settings(args: argparse.Namespace) -> FormalExperimentSettings:
         reward_quality_deficit_weight=float(args.reward_quality_deficit_weight),
         reward_delay_excess_weight=float(args.reward_delay_excess_weight),
         reward_virtual_queue_weight=float(args.reward_virtual_queue_weight),
+        candidate_mode=str(args.candidate_mode),
+        candidate_top_k=int(args.candidate_top_k),
         exist_ok=bool(args.exist_ok),
         dry_run=bool(args.dry_run),
         skip_plots=bool(args.skip_plots),
@@ -193,6 +203,10 @@ def _validate_settings(settings: FormalExperimentSettings) -> None:
     ):
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
+    if settings.candidate_mode not in CANDIDATE_MODES:
+        raise ValueError(f"--candidate-mode must be one of {CANDIDATE_MODES}")
+    if settings.candidate_top_k <= 0:
+        raise ValueError("--candidate-top-k must be positive")
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -263,6 +277,8 @@ def _build_seed_command(settings: FormalExperimentSettings, seed: int) -> list[s
         ("--reward-quality-deficit-weight", settings.reward_quality_deficit_weight),
         ("--reward-delay-excess-weight", settings.reward_delay_excess_weight),
         ("--reward-virtual-queue-weight", settings.reward_virtual_queue_weight),
+        ("--candidate-mode", settings.candidate_mode),
+        ("--candidate-top-k", settings.candidate_top_k),
     ]
     for flag, value in optional_args:
         if value is not None:
@@ -359,6 +375,9 @@ def _aggregate_by_keys(
                 "mean_delay_ms": _mean_metric(group_rows, "mean_delay_ms"),
                 "mean_total_energy_j": _mean_metric(group_rows, "total_energy_j"),
                 "mean_total_aosi_cost": _mean_metric(group_rows, "total_aosi_cost"),
+                "mean_candidate_remap_count": _mean_metric(group_rows, "candidate_remap_count"),
+                "mean_candidate_count": _mean_metric(group_rows, "mean_candidate_count"),
+                "mean_executed_illegal_count": _mean_metric(group_rows, "executed_illegal_count"),
             }
         )
         aggregate_rows.append(item)
@@ -396,12 +415,12 @@ def _build_scenario_formal_summary(
 
 
 def _mean_metric(rows: Sequence[Mapping[str, object]], key: str) -> float:
-    values = [float(row[key]) for row in rows]
+    values = [float(row[key]) for row in rows if key in row and row[key] not in {"", None}]
     return sum(values) / len(values) if values else 0.0
 
 
 def _std_metric(rows: Sequence[Mapping[str, object]], key: str) -> float:
-    values = [float(row[key]) for row in rows]
+    values = [float(row[key]) for row in rows if key in row and row[key] not in {"", None}]
     if not values:
         return 0.0
     mean = sum(values) / len(values)
@@ -465,6 +484,11 @@ def _write_formal_outputs(
                 "quality_deficit_weight": settings.reward_quality_deficit_weight,
                 "delay_excess_weight": settings.reward_delay_excess_weight,
                 "virtual_queue_weight": settings.reward_virtual_queue_weight,
+            },
+            "candidate_actions": {
+                "mode": settings.candidate_mode,
+                "top_k": settings.candidate_top_k,
+                "note": "Raw PPO actions are modulo-remapped only when candidate mode is not fixed.",
             },
         },
         "seed_runs": [
@@ -566,7 +590,17 @@ def _write_figures(
         fig.savefig(figures["figure_training_curve_qoe"], dpi=180)
         plt.close(fig)
 
-        action_columns = ("local_count", "offload_count", "drop_count", "illegal_count")
+        action_columns = tuple(
+            column
+            for column in (
+                "local_count",
+                "offload_count",
+                "drop_count",
+                "illegal_count",
+                "candidate_remap_count",
+            )
+            if column in curve
+        )
         action_grouped = (
             curve.groupby("timestep", as_index=False)[list(action_columns)]
             .mean()
@@ -643,6 +677,8 @@ def _write_comparison_report(
         f"- ROI limit: {settings.limit_rois}",
         f"- PPO timesteps per scenario: {settings.total_timesteps}",
         f"- Scenarios: {', '.join(SCENARIO_NAMES)}",
+        f"- Candidate mode: {settings.candidate_mode}",
+        f"- Candidate top-k: {settings.candidate_top_k}",
         "",
         "## Policy Aggregate",
         "",

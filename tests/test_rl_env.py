@@ -58,11 +58,18 @@ def _env(
     visible: bool = True,
     rois_per_slot: int = 2,
     deadline_ms: float = 100.0,
+    candidate_mode: str | None = None,
+    candidate_top_k: int | None = None,
     reward_quality_deficit_weight: float = 0.0,
     reward_delay_excess_weight: float = 0.0,
     reward_virtual_queue_weight: float = 0.0,
 ) -> LeoSchedulingEnv:
     table = ActionProfileTable.from_frame(_profile_frame())
+    candidate_kwargs: dict[str, object] = {}
+    if candidate_mode is not None:
+        candidate_kwargs["candidate_mode"] = candidate_mode
+    if candidate_top_k is not None:
+        candidate_kwargs["candidate_top_k"] = candidate_top_k
     return LeoSchedulingEnv(
         table,
         config=SimulationConfig(
@@ -82,6 +89,7 @@ def _env(
         reward_quality_deficit_weight=reward_quality_deficit_weight,
         reward_delay_excess_weight=reward_delay_excess_weight,
         reward_virtual_queue_weight=reward_virtual_queue_weight,
+        **candidate_kwargs,
     )
 
 
@@ -131,6 +139,69 @@ class LeoSchedulingEnvTests(unittest.TestCase):
         self.assertTrue(info["illegal"])
         self.assertLessEqual(reward, -1.0)
         self.assertEqual(info["success"], False)
+
+    def test_fixed_candidate_mode_keeps_raw_action_index_behavior(self) -> None:
+        env = _env(visible=False, candidate_mode="fixed")
+        env.reset()
+        raw_action = env.action_index(
+            kind="offload",
+            target_node="sat_1",
+            exit_level=2,
+            compression_level="beta_1",
+        )
+
+        _, _, _, _, info = env.step(raw_action)
+
+        self.assertEqual(info["candidate_mode"], "fixed")
+        self.assertEqual(info["raw_action_index"], raw_action)
+        self.assertEqual(info["mapped_action_index"], raw_action)
+        self.assertFalse(info["candidate_remapped"])
+        self.assertTrue(info["illegal"])
+
+    def test_legal_candidate_mode_never_executes_invisible_offload(self) -> None:
+        env = _env(visible=False, candidate_mode="legal")
+        env.reset()
+        raw_action = env.action_index(
+            kind="offload",
+            target_node="sat_1",
+            exit_level=2,
+            compression_level="beta_1",
+        )
+
+        _, _, _, _, info = env.step(raw_action)
+
+        self.assertEqual(info["candidate_mode"], "legal")
+        self.assertEqual(info["raw_action_index"], raw_action)
+        self.assertNotEqual(info["mapped_action_index"], raw_action)
+        self.assertTrue(info["candidate_remapped"])
+        self.assertFalse(info["illegal"])
+        self.assertNotEqual(info["action_kind"], "offload")
+        self.assertNotIn("sat_1:", info["candidate_labels"])
+
+    def test_legal_candidate_mode_maps_raw_action_modulo_candidate_count(self) -> None:
+        env = _env(visible=True, candidate_mode="legal")
+        env.reset()
+        raw_action = env.action_space.n - 1
+
+        _, _, _, _, info = env.step(raw_action)
+
+        self.assertEqual(info["candidate_mode"], "legal")
+        self.assertGreater(info["candidate_count"], 1)
+        self.assertEqual(
+            info["mapped_action_index"],
+            env._candidate_action_indices("roi_a", env._links_for_slot(0))[raw_action % info["candidate_count"]],
+        )
+
+    def test_feasible_topk_limits_candidate_count_and_preserves_drop(self) -> None:
+        env = _env(visible=True, candidate_mode="feasible-topk", candidate_top_k=1)
+        env.reset()
+
+        _, _, _, _, info = env.step(env.action_space.n - 1)
+
+        self.assertEqual(info["candidate_mode"], "feasible-topk")
+        self.assertLessEqual(info["candidate_count"], 2)
+        self.assertIn("drop", info["candidate_labels"].split("|"))
+        self.assertEqual(info["illegal"], False)
 
     def test_local_and_offload_actions_affect_costs_and_queue_arrivals(self) -> None:
         local_env = _env()

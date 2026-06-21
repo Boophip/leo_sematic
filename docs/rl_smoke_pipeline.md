@@ -49,6 +49,18 @@ Constraint-shaping diagnostic run:
 F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 128 --total-timesteps 1024 --eval-frequency 256 --checkpoint-frequency 256 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --exist-ok
 ```
 
+Candidate-action diagnostic run:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 256 --candidate-mode legal --eval-frequency 128 --checkpoint-frequency 128 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_candidate_legal_smoke --exist-ok
+```
+
+Candidate top-k ablation:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\17_train_ppo_smoke.py --limit-rois 64 --total-timesteps 256 --candidate-mode feasible-topk --candidate-top-k 12 --eval-frequency 128 --checkpoint-frequency 128 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_candidate_topk_smoke --exist-ok
+```
+
 Reuse an existing checkpoint without training:
 
 ```powershell
@@ -132,6 +144,23 @@ degenerate all-drop checkpoint.
 training reward. They are diagnostic stabilizers inspired by the paper's
 quality and delay virtual queues. They do not change the canonical slot-level
 `qoe_total` formula used for reports and baseline comparison.
+
+`--candidate-mode fixed` is the default and preserves the original stable
+discrete action mapping. `--candidate-mode legal` keeps the same SB3 PPO model
+but remaps each raw PPO action into `drop` plus currently legal local/offload
+actions by modulo indexing. Physically unavailable offloads, zero-rate AMC
+links, and missing action profiles are therefore not executed. This is the main
+paper-consistent candidate setting because PPO still chooses among available
+actions; the layer only enforces physical feasibility.
+
+`--candidate-mode feasible-topk` first builds the legal set, then keeps `drop`
+and the top-K non-drop actions ranked by proxy quality, delay proxy, and
+compressed-byte cost. It is a candidate-generation ablation, not the default
+paper setting. Both candidate modes record `raw_action_index`,
+`mapped_action_index`, `candidate_count`, `candidate_labels`, and
+`candidate_remapped` in `eval_decisions.csv`. The training curve additionally
+records candidate remap count, mean candidate count, and executed illegal count.
+None of these modes changes the canonical `qoe_total` report formula.
 
 The RL observation includes quality and delay virtual queues following the
 paper's constraint-tracking idea. These queues are reported separately and do

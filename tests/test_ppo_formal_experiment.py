@@ -88,6 +88,8 @@ class PpoFormalExperimentTests(unittest.TestCase):
             reward_quality_deficit_weight=0.3,
             reward_delay_excess_weight=0.5,
             reward_virtual_queue_weight=0.1,
+            candidate_mode="legal",
+            candidate_top_k=12,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,
@@ -114,6 +116,10 @@ class PpoFormalExperimentTests(unittest.TestCase):
         self.assertIn("0.5", command)
         self.assertIn("--reward-virtual-queue-weight", command)
         self.assertIn("0.1", command)
+        self.assertIn("--candidate-mode", command)
+        self.assertIn("legal", command)
+        self.assertIn("--candidate-top-k", command)
+        self.assertIn("12", command)
 
     def test_runtime_estimate_scales_with_seed_and_scenario_count(self) -> None:
         runner = _load_runner_module()
@@ -142,6 +148,8 @@ class PpoFormalExperimentTests(unittest.TestCase):
             reward_quality_deficit_weight=0.0,
             reward_delay_excess_weight=0.0,
             reward_virtual_queue_weight=0.0,
+            candidate_mode="fixed",
+            candidate_top_k=12,
             exist_ok=True,
             dry_run=False,
             skip_plots=True,

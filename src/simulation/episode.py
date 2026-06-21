@@ -196,6 +196,12 @@ class DecisionResult:
     timeout: bool
     quality_violation: bool
     illegal: bool
+    raw_action_index: int = -1
+    mapped_action_index: int = -1
+    candidate_mode: str = "fixed"
+    candidate_count: int = 0
+    candidate_labels: str = ""
+    candidate_remapped: bool = False
 
     def as_row(self) -> dict[str, object]:
         return asdict(self)
@@ -902,9 +908,12 @@ def summarize_decisions(
         "offload_count": sum(1 for row in processed if row.action_kind == OFFLOAD_ACTION),
         "local_count": sum(1 for row in processed if row.action_kind == LOCAL_ACTION),
         "illegal_count": sum(1 for row in decisions if row.illegal),
+        "executed_illegal_count": sum(1 for row in decisions if row.illegal),
         "success_count": sum(1 for row in decisions if row.success),
         "timeout_count": sum(1 for row in decisions if row.timeout),
         "quality_violation_count": sum(1 for row in decisions if row.quality_violation),
+        "candidate_remap_count": sum(1 for row in decisions if row.candidate_remapped),
+        "mean_candidate_count": _mean([row.candidate_count for row in decisions if row.candidate_count > 0]),
         "success_rate": _safe_div(sum(1 for row in decisions if row.success), len(decisions)),
         "semantic_success_rate": _safe_div(
             sum(row.semantic_value for row in decisions if row.success),

@@ -2,10 +2,10 @@
 
 This stage promotes the PPO scheduling closure from one smoke run to a
 multi-seed experiment manager. It does not change the simulation formulas,
-reward accounting, action space, quality proxy, or synthetic link-trace model.
-It only repeats the existing PPO all-scenario runner, aggregates mean and
-standard deviation statistics, and writes paper-facing CSV, Markdown, and PNG
-artifacts.
+reward accounting, fixed SB3 raw action-space size, quality proxy, or synthetic
+link-trace model. It repeats the existing PPO all-scenario runner, optionally
+passes candidate-action settings through, aggregates mean and standard
+deviation statistics, and writes paper-facing CSV, Markdown, and PNG artifacts.
 
 ## Code Position
 
@@ -56,6 +56,18 @@ Constraint-shaping diagnostic pilot:
 F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --seeds 42 43 --limit-rois 128 --total-timesteps 2048 --eval-frequency 256 --checkpoint-frequency 512 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_constraint_diagnostic --exist-ok
 ```
 
+Legal-candidate pilot:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --seeds 42 43 --limit-rois 128 --total-timesteps 2048 --candidate-mode legal --eval-frequency 256 --checkpoint-frequency 512 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_candidate_legal_pilot --exist-ok
+```
+
+Feasible top-k candidate ablation:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --seeds 42 43 --limit-rois 128 --total-timesteps 2048 --candidate-mode feasible-topk --candidate-top-k 12 --eval-frequency 256 --checkpoint-frequency 512 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_candidate_topk_pilot --exist-ok
+```
+
 ## Outputs
 
 ```text
@@ -96,6 +108,16 @@ The optional `--reward-quality-deficit-weight`,
 shape only the PPO training reward. The aggregate reports still rank policies
 with canonical `qoe_total`, so shaped runs should be labeled as diagnostic or
 ablation runs rather than mixed silently with unshaped formal results.
+
+The optional `--candidate-mode` parameter is passed through to the smoke runner.
+`fixed` preserves the original action mapping. `legal` is the main
+paper-consistent candidate experiment: PPO still outputs a standard discrete
+raw action, and the environment remaps it into the current physical legal
+candidate set. `feasible-topk` keeps `drop` and top-K legal non-drop actions as
+a candidate-generation ablation. These modes do not modify canonical QoE; they
+only affect which physically feasible action is executed for a raw PPO index.
+Formal CSVs include candidate remap count, mean candidate count, and executed
+illegal count so candidate experiments can be audited separately from QoE.
 
 ## Current Scope
 
