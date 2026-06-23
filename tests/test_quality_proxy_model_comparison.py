@@ -26,22 +26,71 @@ class QualityProxyModelComparisonTests(unittest.TestCase):
                 "test_r2": 0.90,
                 "test_threshold_f1": 0.90,
                 "test_high_value_mae": 0.20,
+                "model_size_bytes": 100_000,
             },
             {
                 "model_type": "hist_gbdt",
                 "test_r2": 0.70,
                 "test_threshold_f1": 0.70,
                 "test_high_value_mae": 0.10,
+                "model_size_bytes": 100_000,
             },
             {
                 "model_type": "extra_trees",
                 "test_r2": 0.80,
                 "test_threshold_f1": 0.85,
                 "test_high_value_mae": 0.10,
+                "model_size_bytes": 100_000,
             },
         ]
 
         selected = module.choose_primary_model(rows)
+
+        self.assertEqual(selected["model_type"], "extra_trees")
+
+    def test_choose_primary_model_respects_lightweight_size_cap(self) -> None:
+        module = load_script_module()
+        rows = [
+            {
+                "model_type": "mlp",
+                "test_r2": 0.64,
+                "test_threshold_f1": 0.86,
+                "test_high_value_mae": 0.13,
+                "model_size_bytes": 600_000,
+            },
+            {
+                "model_type": "extra_trees",
+                "test_r2": 0.66,
+                "test_threshold_f1": 0.87,
+                "test_high_value_mae": 0.12,
+                "model_size_bytes": 800 * 1024 * 1024,
+            },
+        ]
+
+        selected = module.choose_primary_model(rows, max_primary_model_mb=50.0)
+
+        self.assertEqual(selected["model_type"], "mlp")
+
+    def test_choose_primary_model_falls_back_when_all_models_exceed_size_cap(self) -> None:
+        module = load_script_module()
+        rows = [
+            {
+                "model_type": "random_forest",
+                "test_r2": 0.61,
+                "test_threshold_f1": 0.84,
+                "test_high_value_mae": 0.15,
+                "model_size_bytes": 600 * 1024 * 1024,
+            },
+            {
+                "model_type": "extra_trees",
+                "test_r2": 0.66,
+                "test_threshold_f1": 0.87,
+                "test_high_value_mae": 0.12,
+                "model_size_bytes": 800 * 1024 * 1024,
+            },
+        ]
+
+        selected = module.choose_primary_model(rows, max_primary_model_mb=50.0)
 
         self.assertEqual(selected["model_type"], "extra_trees")
 

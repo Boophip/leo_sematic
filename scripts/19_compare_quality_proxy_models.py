@@ -28,6 +28,7 @@ DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "proxy" / "model_comparison"
 COMPARISON_FIELDNAMES = (
     "model_type",
     "model_path",
+    "model_size_bytes",
     "test_mae",
     "test_mse",
     "test_r2",
@@ -48,17 +49,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-iter", type=int, default=500)
     parser.add_argument("--hidden-layer-sizes", type=int, nargs="+", default=[32, 16])
     parser.add_argument("--quality-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--max-primary-model-mb",
+        type=float,
+        default=50.0,
+        help=(
+            "Only models at or below this size are eligible for primary selection. "
+            "Use a non-positive value to disable the lightweight cap."
+        ),
+    )
     parser.add_argument("--no-image-features", action="store_true")
     parser.add_argument("--exist-ok", action="store_true")
     return parser.parse_args()
 
 
-def choose_primary_model(rows: Iterable[Mapping[str, object]]) -> Mapping[str, object]:
-    """Pick the strongest model using high-value MAE, then R2, then F1."""
+def choose_primary_model(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    max_primary_model_mb: float | None = 50.0,
+) -> Mapping[str, object]:
+    """Pick the best lightweight model using high-value MAE, then R2, then F1."""
 
     candidates = list(rows)
     if not candidates:
         raise ValueError("at least one model comparison row is required")
+    if max_primary_model_mb is not None and max_primary_model_mb > 0:
+        max_bytes = max_primary_model_mb * 1024 * 1024
+        lightweight_candidates = [
+            row
+            for row in candidates
+            if float(row.get("model_size_bytes", float("inf"))) <= max_bytes
+        ]
+        if lightweight_candidates:
+            candidates = lightweight_candidates
     return sorted(
         candidates,
         key=lambda row: (
@@ -83,9 +106,11 @@ def _comparison_row(model_type: str, summary: Mapping[str, object]) -> dict[str,
     threshold = metrics["threshold_metrics"]  # type: ignore[index]
     ranking = metrics["action_ranking"]  # type: ignore[index]
     outputs = summary["model_path"]
+    model_path = Path(str(outputs))
     return {
         "model_type": model_type,
         "model_path": outputs,
+        "model_size_bytes": model_path.stat().st_size,
         "test_mae": metrics["mae"],  # type: ignore[index]
         "test_mse": metrics["mse"],  # type: ignore[index]
         "test_r2": metrics["r2"],  # type: ignore[index]
@@ -127,7 +152,13 @@ def main() -> int:
         summaries[model_type] = summary
         comparison_rows.append(_comparison_row(model_type, summary))
 
-    primary = choose_primary_model(comparison_rows)
+    max_primary_model_mb = args.max_primary_model_mb
+    if max_primary_model_mb is not None and max_primary_model_mb <= 0:
+        max_primary_model_mb = None
+    primary = choose_primary_model(
+        comparison_rows,
+        max_primary_model_mb=max_primary_model_mb,
+    )
     primary_model_path = Path(str(primary["model_path"]))
     copied_primary_path = args.output_dir / "quality_proxy.joblib"
     shutil.copy2(primary_model_path, copied_primary_path)
@@ -145,6 +176,7 @@ def main() -> int:
             "hidden_layer_sizes": list(args.hidden_layer_sizes),
             "quality_threshold": args.quality_threshold,
             "include_image_features": not args.no_image_features,
+            "max_primary_model_mb": max_primary_model_mb,
         },
         "primary_model": {
             **dict(primary),

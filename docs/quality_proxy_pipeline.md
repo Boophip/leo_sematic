@@ -85,6 +85,11 @@ To compare all supported model families on the same split:
 F:\anaconda\envs\leo_semantic\python.exe scripts\19_compare_quality_proxy_models.py --profile-csv data\profiling\dota_v1_lite_300_100_100\test_full\roi_profile_smoke.csv --exist-ok
 ```
 
+The comparison script records each `.joblib` size and, by default, only models
+at or below 50 MB are eligible to become the copied primary proxy. This keeps
+the selected proxy aligned with the lightweight-system assumption. Use
+`--max-primary-model-mb 0` only when intentionally disabling that cap.
+
 Outputs:
 
 - `outputs/proxy/smoke/quality_proxy.joblib`
@@ -94,8 +99,8 @@ Outputs:
 
 The `.joblib` file stores the full sklearn feature pipeline, selected regressor,
 feature contract, and model type. The summary stores feature lists, leakage
-fields, split strategy, metrics, grouped errors, and scheduling-oriented
-diagnostics.
+fields, split strategy, model sizes, metrics, grouped errors, and
+scheduling-oriented diagnostics.
 
 ## Split Policy
 
