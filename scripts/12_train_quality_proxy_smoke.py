@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.proxy.quality_proxy import train_quality_proxy_smoke  # noqa: E402
+from src.proxy.quality_proxy import MODEL_TYPES, MODEL_TYPE_HIST_GBDT, train_quality_proxy_smoke  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-iter", type=int, default=500)
+    parser.add_argument("--model-type", choices=MODEL_TYPES, default=MODEL_TYPE_HIST_GBDT)
+    parser.add_argument("--include-image-features", action="store_true")
+    parser.add_argument("--quality-threshold", type=float, default=0.5)
     parser.add_argument(
         "--hidden-layer-sizes",
         type=int,
@@ -57,7 +60,7 @@ def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
 def main() -> int:
     args = parse_args()
     _prepare_output_dir(args.output_dir, exist_ok=args.exist_ok)
-    print("Quality proxy smoke training estimate: about 1-3 minutes; not a formal run.")
+    print("Quality proxy training estimate: about 1-5 minutes; not an RL run.")
     summary = train_quality_proxy_smoke(
         args.profile_csv,
         args.output_dir,
@@ -65,6 +68,9 @@ def main() -> int:
         seed=args.seed,
         max_iter=args.max_iter,
         hidden_layer_sizes=args.hidden_layer_sizes,
+        model_type=args.model_type,
+        include_image_features=args.include_image_features,
+        quality_threshold=args.quality_threshold,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0

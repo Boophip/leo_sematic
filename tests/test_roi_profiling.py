@@ -10,6 +10,7 @@ from PIL import Image
 from src.profiling.profile_generation import (
     ExitProfile,
     PROFILE_FIELDNAMES,
+    IMAGE_PROFILE_FIELDNAMES,
     load_roi_metadata,
     profile_roi_records,
     write_profile_csv,
@@ -60,6 +61,10 @@ class RoiProfilingTests(unittest.TestCase):
                 self.assertIn("task_quality", PROFILE_FIELDNAMES)
                 self.assertIn("detector_confidence", PROFILE_FIELDNAMES)
                 self.assertIn("exit_confidence", PROFILE_FIELDNAMES)
+                for field_name in IMAGE_PROFILE_FIELDNAMES:
+                    self.assertIn(field_name, PROFILE_FIELDNAMES)
+                    value = getattr(row, field_name)
+                    self.assertGreaterEqual(value, 0.0)
                 self.assertNotIn("confidence", PROFILE_FIELDNAMES)
                 self.assertEqual(row.class_id, 0)
                 self.assertAlmostEqual(row.detector_confidence, 0.8)

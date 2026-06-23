@@ -10,7 +10,9 @@ from sklearn.exceptions import ConvergenceWarning
 
 from src.proxy.quality_proxy import (
     FEATURE_COLUMNS,
+    IMAGE_FEATURE_COLUMNS,
     LEAKAGE_FIELDS,
+    MODEL_TYPES,
     load_quality_proxy,
     split_profile_frame,
     train_quality_proxy_smoke,
@@ -48,6 +50,20 @@ def make_profile_frame() -> pd.DataFrame:
                         "encoded_format": "PNG",
                         "output_width": 32,
                         "output_height": 48,
+                        "crop_width": 32,
+                        "crop_height": 48,
+                        "crop_aspect_ratio": 32 / 48,
+                        "brightness_mean": 0.4 + 0.05 * image_index,
+                        "brightness_std": 0.1 + 0.02 * exit_level,
+                        "rgb_mean_r": 0.3,
+                        "rgb_mean_g": 0.4,
+                        "rgb_mean_b": 0.5,
+                        "rgb_std_r": 0.1,
+                        "rgb_std_g": 0.2,
+                        "rgb_std_b": 0.3,
+                        "laplacian_var": 0.2 + 0.1 * exit_level,
+                        "edge_density": 0.05 + 0.01 * image_index,
+                        "entropy": 1.0 + 0.1 * image_index,
                         "predicted_class_id": 0,
                         "exit_confidence": 0.9,
                     }
@@ -59,6 +75,7 @@ class QualityProxyTests(unittest.TestCase):
     def test_feature_policy_excludes_leakage_fields(self) -> None:
         validate_feature_policy()
         self.assertFalse(set(FEATURE_COLUMNS) & set(LEAKAGE_FIELDS))
+        self.assertTrue(set(IMAGE_FEATURE_COLUMNS).issubset(set(FEATURE_COLUMNS)))
 
     def test_group_split_keeps_image_ids_disjoint(self) -> None:
         frame = make_profile_frame()
@@ -96,6 +113,9 @@ class QualityProxyTests(unittest.TestCase):
                     seed=3,
                     max_iter=50,
                     hidden_layer_sizes=(8,),
+                    model_type="mlp",
+                    include_image_features=True,
+                    quality_threshold=0.5,
                 )
             model = load_quality_proxy(output_dir / "quality_proxy.joblib")
             predictions = model.predict_quality(make_profile_frame().head(3))
@@ -105,8 +125,42 @@ class QualityProxyTests(unittest.TestCase):
             self.assertIn("mae", summary["metrics"]["test"])
             self.assertIn("mse", summary["metrics"]["test"])
             self.assertIn("r2", summary["metrics"]["test"])
+            self.assertEqual(summary["configuration"]["model_type"], "mlp")
+            self.assertIn("threshold_metrics", summary["metrics"]["test"])
+            self.assertIn("action_ranking", summary["metrics"]["test"])
+            self.assertIn("high_value", summary["metrics"]["test"])
             self.assertEqual(len(predictions), 3)
             self.assertTrue(((predictions >= 0.0) & (predictions <= 1.0)).all())
+
+    def test_train_save_load_and_predict_quality_with_each_model_type(self) -> None:
+        for model_type in MODEL_TYPES:
+            with self.subTest(model_type=model_type):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    profile_csv = root / "profile.csv"
+                    output_dir = root / "proxy"
+                    make_profile_frame().to_csv(profile_csv, index=False)
+
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                        summary = train_quality_proxy_smoke(
+                            profile_csv,
+                            output_dir,
+                            test_size=0.34,
+                            seed=3,
+                            max_iter=50,
+                            hidden_layer_sizes=(8,),
+                            model_type=model_type,
+                            include_image_features=True,
+                            quality_threshold=0.5,
+                        )
+                    model = load_quality_proxy(output_dir / "quality_proxy.joblib")
+                    predictions = model.predict_quality(make_profile_frame().head(2))
+
+                    self.assertEqual(summary["configuration"]["model_type"], model_type)
+                    self.assertEqual(model.model_type, model_type)
+                    self.assertEqual(len(predictions), 2)
+                    self.assertTrue(((predictions >= 0.0) & (predictions <= 1.0)).all())
 
 
 if __name__ == "__main__":

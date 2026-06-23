@@ -10,6 +10,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 from PIL import Image
 
+from src.proxy.image_features import IMAGE_FEATURE_COLUMNS, extract_image_quality_features
 from src.profiling.compression import DEFAULT_BETA_LEVELS, compress_image
 
 
@@ -48,11 +49,26 @@ class RoiProfileRow:
     encoded_format: str
     output_width: int
     output_height: int
+    crop_width: float
+    crop_height: float
+    crop_aspect_ratio: float
+    brightness_mean: float
+    brightness_std: float
+    rgb_mean_r: float
+    rgb_mean_g: float
+    rgb_mean_b: float
+    rgb_std_r: float
+    rgb_std_g: float
+    rgb_std_b: float
+    laplacian_var: float
+    edge_density: float
+    entropy: float
     predicted_class_id: int
     exit_confidence: float
 
 
 PROFILE_FIELDNAMES = tuple(RoiProfileRow.__dataclass_fields__.keys())
+IMAGE_PROFILE_FIELDNAMES = IMAGE_FEATURE_COLUMNS
 
 
 Predictor = Callable[[Image.Image, Mapping[str, object]], Sequence[ExitProfile]]
@@ -91,6 +107,7 @@ def profile_roi_records(
             # Compression is performed before model inference so each row
             # captures the action-dependent byte size, latency, and quality.
             compressed = compress_image(source, level)
+            image_features = extract_image_quality_features(compressed.decoded_image)
             exit_profiles = predictor(compressed.decoded_image, record)
             for exit_profile in exit_profiles:
                 rows.append(
@@ -115,6 +132,20 @@ def profile_roi_records(
                         encoded_format=compressed.encoded_format,
                         output_width=compressed.output_width,
                         output_height=compressed.output_height,
+                        crop_width=image_features["crop_width"],
+                        crop_height=image_features["crop_height"],
+                        crop_aspect_ratio=image_features["crop_aspect_ratio"],
+                        brightness_mean=image_features["brightness_mean"],
+                        brightness_std=image_features["brightness_std"],
+                        rgb_mean_r=image_features["rgb_mean_r"],
+                        rgb_mean_g=image_features["rgb_mean_g"],
+                        rgb_mean_b=image_features["rgb_mean_b"],
+                        rgb_std_r=image_features["rgb_std_r"],
+                        rgb_std_g=image_features["rgb_std_g"],
+                        rgb_std_b=image_features["rgb_std_b"],
+                        laplacian_var=image_features["laplacian_var"],
+                        edge_density=image_features["edge_density"],
+                        entropy=image_features["entropy"],
                         predicted_class_id=exit_profile.predicted_class_id,
                         exit_confidence=exit_profile.exit_confidence,
                     )
