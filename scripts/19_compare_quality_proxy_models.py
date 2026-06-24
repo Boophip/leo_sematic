@@ -13,7 +13,13 @@ from typing import Iterable, Mapping
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.proxy.quality_proxy import MODEL_TYPES, train_quality_proxy_smoke  # noqa: E402
+from src.proxy.quality_proxy import (  # noqa: E402
+    MODEL_TYPE_HIST_GBDT,
+    MODEL_TYPE_MLP,
+    MODEL_TYPES,
+    train_quality_proxy_smoke,
+    train_quality_proxy_strict,
+)
 
 
 DEFAULT_PROFILE_CSV = (
@@ -24,11 +30,18 @@ DEFAULT_PROFILE_CSV = (
     / "test_full"
     / "roi_profile_smoke.csv"
 )
-DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "proxy" / "model_comparison"
+DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "proxy" / "strict_image_features"
 COMPARISON_FIELDNAMES = (
     "model_type",
     "model_path",
     "model_size_bytes",
+    "val_mae",
+    "val_mse",
+    "val_r2",
+    "val_high_value_mae",
+    "val_threshold_f1",
+    "val_top1_agreement",
+    "val_mean_regret",
     "test_mae",
     "test_mse",
     "test_r2",
@@ -42,12 +55,20 @@ COMPARISON_FIELDNAMES = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile-csv", type=Path, default=DEFAULT_PROFILE_CSV)
+    parser.add_argument("--train-profile-csv", type=Path)
+    parser.add_argument("--val-profile-csv", type=Path)
+    parser.add_argument("--test-profile-csv", type=Path)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--model-types", nargs="+", choices=MODEL_TYPES, default=list(MODEL_TYPES))
+    parser.add_argument(
+        "--model-types",
+        nargs="+",
+        choices=MODEL_TYPES,
+        default=[MODEL_TYPE_MLP, MODEL_TYPE_HIST_GBDT],
+    )
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-iter", type=int, default=500)
-    parser.add_argument("--hidden-layer-sizes", type=int, nargs="+", default=[32, 16])
+    parser.add_argument("--hidden-layer-sizes", type=int, nargs="+", default=[128, 64, 32])
     parser.add_argument("--quality-threshold", type=float, default=0.5)
     parser.add_argument(
         "--max-primary-model-mb",
@@ -68,7 +89,7 @@ def choose_primary_model(
     *,
     max_primary_model_mb: float | None = 50.0,
 ) -> Mapping[str, object]:
-    """Pick the best lightweight model using high-value MAE, then R2, then F1."""
+    """Pick the best lightweight model using validation metrics when present."""
 
     candidates = list(rows)
     if not candidates:
@@ -82,14 +103,16 @@ def choose_primary_model(
         ]
         if lightweight_candidates:
             candidates = lightweight_candidates
-    return sorted(
-        candidates,
-        key=lambda row: (
-            float(row["test_high_value_mae"]),
-            -float(row["test_r2"]),
-            -float(row["test_threshold_f1"]),
-        ),
-    )[0]
+    def selection_key(row: Mapping[str, object]) -> tuple[float, float, float, float]:
+        prefix = "val" if "val_high_value_mae" in row else "test"
+        return (
+            float(row[f"{prefix}_high_value_mae"]),
+            -float(row[f"{prefix}_r2"]),
+            -float(row[f"{prefix}_threshold_f1"]),
+            float(row.get("model_size_bytes", 0.0)),
+        )
+
+    return sorted(candidates, key=selection_key)[0]
 
 
 def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
@@ -101,23 +124,35 @@ def _prepare_output_dir(path: Path, *, exist_ok: bool) -> None:
 
 
 def _comparison_row(model_type: str, summary: Mapping[str, object]) -> dict[str, object]:
-    metrics = summary["metrics"]["test"]  # type: ignore[index]
-    high_value = metrics["high_value"]  # type: ignore[index]
-    threshold = metrics["threshold_metrics"]  # type: ignore[index]
-    ranking = metrics["action_ranking"]  # type: ignore[index]
+    all_metrics = summary["metrics"]  # type: ignore[index]
+    val_metrics = all_metrics.get("val", all_metrics["test"])  # type: ignore[union-attr,index]
+    test_metrics = all_metrics["test"]  # type: ignore[index]
+    val_high_value = val_metrics["high_value"]  # type: ignore[index]
+    val_threshold = val_metrics["threshold_metrics"]  # type: ignore[index]
+    val_ranking = val_metrics["action_ranking"]  # type: ignore[index]
+    test_high_value = test_metrics["high_value"]  # type: ignore[index]
+    test_threshold = test_metrics["threshold_metrics"]  # type: ignore[index]
+    test_ranking = test_metrics["action_ranking"]  # type: ignore[index]
     outputs = summary["model_path"]
     model_path = Path(str(outputs))
     return {
         "model_type": model_type,
         "model_path": outputs,
-        "model_size_bytes": model_path.stat().st_size,
-        "test_mae": metrics["mae"],  # type: ignore[index]
-        "test_mse": metrics["mse"],  # type: ignore[index]
-        "test_r2": metrics["r2"],  # type: ignore[index]
-        "test_high_value_mae": high_value["mae"],
-        "test_threshold_f1": threshold["f1"],
-        "test_top1_agreement": ranking["top1_agreement"],
-        "test_mean_regret": ranking["mean_regret"],
+        "model_size_bytes": summary.get("model_size_bytes", model_path.stat().st_size),
+        "val_mae": val_metrics["mae"],  # type: ignore[index]
+        "val_mse": val_metrics["mse"],  # type: ignore[index]
+        "val_r2": val_metrics["r2"],  # type: ignore[index]
+        "val_high_value_mae": val_high_value["mae"],
+        "val_threshold_f1": val_threshold["f1"],
+        "val_top1_agreement": val_ranking["top1_agreement"],
+        "val_mean_regret": val_ranking["mean_regret"],
+        "test_mae": test_metrics["mae"],  # type: ignore[index]
+        "test_mse": test_metrics["mse"],  # type: ignore[index]
+        "test_r2": test_metrics["r2"],  # type: ignore[index]
+        "test_high_value_mae": test_high_value["mae"],
+        "test_threshold_f1": test_threshold["f1"],
+        "test_top1_agreement": test_ranking["top1_agreement"],
+        "test_mean_regret": test_ranking["mean_regret"],
     }
 
 
@@ -133,22 +168,42 @@ def main() -> int:
     args = parse_args()
     _prepare_output_dir(args.output_dir, exist_ok=args.exist_ok)
     print("Quality proxy model comparison estimate: about 1-5 minutes per model; not an RL run.")
+    strict_inputs = (args.train_profile_csv, args.val_profile_csv, args.test_profile_csv)
+    strict_mode = any(path is not None for path in strict_inputs)
+    if strict_mode and not all(path is not None for path in strict_inputs):
+        raise ValueError(
+            "--train-profile-csv, --val-profile-csv, and --test-profile-csv must be provided together"
+        )
 
     summaries: dict[str, object] = {}
     comparison_rows: list[dict[str, object]] = []
     for model_type in args.model_types:
         model_output_dir = args.output_dir / model_type
-        summary = train_quality_proxy_smoke(
-            args.profile_csv,
-            model_output_dir,
-            test_size=args.test_size,
-            seed=args.seed,
-            max_iter=args.max_iter,
-            hidden_layer_sizes=args.hidden_layer_sizes,
-            model_type=model_type,
-            include_image_features=not args.no_image_features,
-            quality_threshold=args.quality_threshold,
-        )
+        if strict_mode:
+            summary = train_quality_proxy_strict(
+                args.train_profile_csv,
+                args.val_profile_csv,
+                args.test_profile_csv,
+                model_output_dir,
+                seed=args.seed,
+                max_iter=args.max_iter,
+                hidden_layer_sizes=args.hidden_layer_sizes,
+                model_type=model_type,
+                include_image_features=not args.no_image_features,
+                quality_threshold=args.quality_threshold,
+            )
+        else:
+            summary = train_quality_proxy_smoke(
+                args.profile_csv,
+                model_output_dir,
+                test_size=args.test_size,
+                seed=args.seed,
+                max_iter=args.max_iter,
+                hidden_layer_sizes=args.hidden_layer_sizes,
+                model_type=model_type,
+                include_image_features=not args.no_image_features,
+                quality_threshold=args.quality_threshold,
+            )
         summaries[model_type] = summary
         comparison_rows.append(_comparison_row(model_type, summary))
 
@@ -167,9 +222,19 @@ def main() -> int:
     _write_comparison_csv(comparison_csv, comparison_rows)
     summary_payload = {
         "purpose": "Task-quality proxy model-family comparison.",
-        "profile_csv": str(args.profile_csv.resolve()),
+        "profile_csv": None if strict_mode else str(args.profile_csv.resolve()),
+        "profile_csvs": (
+            None
+            if not strict_mode
+            else {
+                "train": str(args.train_profile_csv.resolve()),
+                "val": str(args.val_profile_csv.resolve()),
+                "test": str(args.test_profile_csv.resolve()),
+            }
+        ),
         "configuration": {
             "model_types": list(args.model_types),
+            "split_mode": "explicit_train_val_test" if strict_mode else "group_shuffle_or_smoke",
             "test_size": args.test_size,
             "seed": args.seed,
             "max_iter": args.max_iter,

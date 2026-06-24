@@ -15,6 +15,7 @@ from src.proxy.quality_proxy import (
     MODEL_TYPES,
     load_quality_proxy,
     split_profile_frame,
+    train_quality_proxy_strict,
     train_quality_proxy_smoke,
     validate_feature_policy,
 )
@@ -161,6 +162,66 @@ class QualityProxyTests(unittest.TestCase):
                     self.assertEqual(model.model_type, model_type)
                     self.assertEqual(len(predictions), 2)
                     self.assertTrue(((predictions >= 0.0) & (predictions <= 1.0)).all())
+
+    def test_strict_training_uses_explicit_disjoint_splits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_csv = root / "train.csv"
+            val_csv = root / "val.csv"
+            test_csv = root / "test.csv"
+            output_dir = root / "strict_proxy"
+            frame = make_profile_frame()
+            frame[frame["image_id"] == "P0001"].to_csv(train_csv, index=False)
+            frame[frame["image_id"] == "P0002"].to_csv(val_csv, index=False)
+            frame[frame["image_id"] == "P0003"].to_csv(test_csv, index=False)
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
+                summary = train_quality_proxy_strict(
+                    train_csv,
+                    val_csv,
+                    test_csv,
+                    output_dir,
+                    seed=3,
+                    max_iter=50,
+                    hidden_layer_sizes=(8,),
+                    model_type="mlp",
+                    include_image_features=True,
+                    quality_threshold=0.5,
+                )
+
+            model = load_quality_proxy(output_dir / "quality_proxy.joblib")
+            predictions = model.predict_quality(frame.head(2))
+
+            self.assertEqual(summary["split"]["strategy"], "explicit_train_val_test")
+            self.assertFalse(summary["split"]["image_overlaps"]["train_val"])
+            self.assertFalse(summary["split"]["image_overlaps"]["train_test"])
+            self.assertFalse(summary["split"]["image_overlaps"]["val_test"])
+            self.assertIn("val", summary["metrics"])
+            self.assertIn("test", summary["metrics"])
+            self.assertIn("action_ranking", summary["metrics"]["test"])
+            self.assertEqual(len(predictions), 2)
+
+    def test_strict_training_rejects_overlapping_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_csv = root / "train.csv"
+            val_csv = root / "val.csv"
+            test_csv = root / "test.csv"
+            frame = make_profile_frame()
+            frame[frame["image_id"] == "P0001"].to_csv(train_csv, index=False)
+            frame[frame["image_id"] == "P0001"].to_csv(val_csv, index=False)
+            frame[frame["image_id"] == "P0003"].to_csv(test_csv, index=False)
+
+            with self.assertRaisesRegex(ValueError, "overlap"):
+                train_quality_proxy_strict(
+                    train_csv,
+                    val_csv,
+                    test_csv,
+                    root / "strict_proxy",
+                    model_type="mlp",
+                    max_iter=10,
+                )
 
 
 if __name__ == "__main__":

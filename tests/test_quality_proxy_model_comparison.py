@@ -94,6 +94,35 @@ class QualityProxyModelComparisonTests(unittest.TestCase):
 
         self.assertEqual(selected["model_type"], "extra_trees")
 
+    def test_choose_primary_model_uses_val_metrics_not_test_metrics(self) -> None:
+        module = load_script_module()
+        rows = [
+            {
+                "model_type": "mlp",
+                "val_r2": 0.80,
+                "val_threshold_f1": 0.82,
+                "val_high_value_mae": 0.10,
+                "test_r2": 0.40,
+                "test_threshold_f1": 0.50,
+                "test_high_value_mae": 0.30,
+                "model_size_bytes": 100_000,
+            },
+            {
+                "model_type": "hist_gbdt",
+                "val_r2": 0.90,
+                "val_threshold_f1": 0.92,
+                "val_high_value_mae": 0.20,
+                "test_r2": 0.99,
+                "test_threshold_f1": 0.99,
+                "test_high_value_mae": 0.01,
+                "model_size_bytes": 100_000,
+            },
+        ]
+
+        selected = module.choose_primary_model(rows)
+
+        self.assertEqual(selected["model_type"], "mlp")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,6 +212,48 @@ def split_profile_frame(
     return SplitResult(train=train, test=test, summary=summary)
 
 
+def validate_explicit_profile_splits(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    include_image_features: bool = True,
+) -> dict[str, object]:
+    """Validate fixed train/val/test profiling splits without reshuffling rows."""
+
+    for name, frame in (("train", train), ("val", val), ("test", test)):
+        validate_profile_frame(frame, include_image_features=include_image_features)
+        if frame.empty:
+            raise ValueError(f"{name} profile split must not be empty")
+
+    train_images = set(train["image_id"].astype(str))
+    val_images = set(val["image_id"].astype(str))
+    test_images = set(test["image_id"].astype(str))
+    overlaps = {
+        "train_val": bool(train_images & val_images),
+        "train_test": bool(train_images & test_images),
+        "val_test": bool(val_images & test_images),
+    }
+    if any(overlaps.values()):
+        details = {
+            "train_val": sorted(train_images & val_images),
+            "train_test": sorted(train_images & test_images),
+            "val_test": sorted(val_images & test_images),
+        }
+        raise ValueError(f"explicit profile split image_id overlap detected: {details}")
+
+    return {
+        "strategy": "explicit_train_val_test",
+        "train_row_count": len(train),
+        "val_row_count": len(val),
+        "test_row_count": len(test),
+        "train_image_count": train["image_id"].nunique(),
+        "val_image_count": val["image_id"].nunique(),
+        "test_image_count": test["image_id"].nunique(),
+        "image_overlaps": overlaps,
+    }
+
+
 def build_quality_proxy_pipeline(
     *,
     model_type: str = MODEL_TYPE_HIST_GBDT,
@@ -514,6 +556,112 @@ def train_quality_proxy_smoke(
             ),
         },
         "grouped_errors": grouped_error_summary(split.test, test_pred),
+    }
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return summary
+
+
+def train_quality_proxy_strict(
+    train_profile_csv: Path,
+    val_profile_csv: Path,
+    test_profile_csv: Path,
+    output_dir: Path,
+    *,
+    seed: int = 42,
+    max_iter: int = 500,
+    hidden_layer_sizes: Sequence[int] = (32, 16),
+    model_type: str = MODEL_TYPE_HIST_GBDT,
+    include_image_features: bool = True,
+    quality_threshold: float = 0.5,
+) -> dict[str, object]:
+    """Train on an explicit train split and report validation/test metrics separately."""
+
+    train_frame = load_profile_csv(train_profile_csv, include_image_features=include_image_features)
+    val_frame = load_profile_csv(val_profile_csv, include_image_features=include_image_features)
+    test_frame = load_profile_csv(test_profile_csv, include_image_features=include_image_features)
+    split_summary = validate_explicit_profile_splits(
+        train_frame,
+        val_frame,
+        test_frame,
+        include_image_features=include_image_features,
+    )
+
+    feature_columns = feature_columns_for(include_image_features=include_image_features)
+    numeric_features = numeric_features_for(include_image_features=include_image_features)
+    pipeline = build_quality_proxy_pipeline(
+        model_type=model_type,
+        numeric_features=numeric_features,
+        categorical_features=CATEGORICAL_FEATURES,
+        hidden_layer_sizes=hidden_layer_sizes,
+        max_iter=max_iter,
+        seed=seed,
+    )
+    pipeline.fit(train_frame[list(feature_columns)], train_frame[TARGET_FIELD].to_numpy())
+
+    train_pred = np.clip(pipeline.predict(train_frame[list(feature_columns)]), 0.0, 1.0)
+    val_pred = np.clip(pipeline.predict(val_frame[list(feature_columns)]), 0.0, 1.0)
+    test_pred = np.clip(pipeline.predict(test_frame[list(feature_columns)]), 0.0, 1.0)
+    model = QualityProxyModel(
+        pipeline=pipeline,
+        feature_columns=tuple(feature_columns),
+        categorical_features=tuple(CATEGORICAL_FEATURES),
+        numeric_features=tuple(numeric_features),
+        leakage_fields=tuple(LEAKAGE_FIELDS),
+        target_field=TARGET_FIELD,
+        model_type=model_type,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / "quality_proxy.joblib"
+    save_quality_proxy(model_path, model)
+    summary = {
+        "purpose": "Strict task-quality proxy training with explicit train/val/test profiling splits.",
+        "profile_csvs": {
+            "train": str(train_profile_csv.resolve()),
+            "val": str(val_profile_csv.resolve()),
+            "test": str(test_profile_csv.resolve()),
+        },
+        "output_dir": str(output_dir.resolve()),
+        "model_path": str(model_path.resolve()),
+        "model_size_bytes": model_path.stat().st_size,
+        "feature_columns": list(feature_columns),
+        "categorical_features": list(CATEGORICAL_FEATURES),
+        "numeric_features": list(numeric_features),
+        "leakage_fields": list(LEAKAGE_FIELDS),
+        "target_field": TARGET_FIELD,
+        "split": split_summary,
+        "configuration": {
+            "seed": seed,
+            "max_iter": max_iter,
+            "hidden_layer_sizes": list(hidden_layer_sizes),
+            "model_type": model_type,
+            "include_image_features": include_image_features,
+            "quality_threshold": quality_threshold,
+        },
+        "metrics": {
+            "train": full_quality_metrics(
+                train_frame,
+                train_pred,
+                quality_threshold=quality_threshold,
+            ),
+            "val": full_quality_metrics(
+                val_frame,
+                val_pred,
+                quality_threshold=quality_threshold,
+            ),
+            "test": full_quality_metrics(
+                test_frame,
+                test_pred,
+                quality_threshold=quality_threshold,
+            ),
+        },
+        "grouped_errors": {
+            "val": grouped_error_summary(val_frame, val_pred),
+            "test": grouped_error_summary(test_frame, test_pred),
+        },
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),

@@ -124,10 +124,75 @@ The smoke report includes:
 Smoke metrics validate the engineering path only and should not be used as
 paper results.
 
+## Strict Train/Val/Test Proxy Flow
+
+The paper-facing proxy workflow uses fixed DOTA image-level splits and does not
+select a model from the final test split. It first generates one profiling table
+per split, then trains on train, selects the primary model with validation
+metrics, and reports final metrics on test.
+
+Before starting the three profiling runs, report this runtime estimate:
+
+```text
+Strict train+val+test profiling estimate: about 40-240 minutes, depending on GPU and disk throughput.
+```
+
+Commands:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\10_profile_roi_compression.py --metadata data\roi_crops_gt\dota_v1_lite_300_100_100\train\roi_metadata_labeled.jsonl --checkpoint outputs\multi_exit\formal\best.pt --output-dir data\profiling\dota_v1_lite_300_100_100\train_strict_image_features --include-local --compression-levels 0 1 2 3 --exist-ok
+
+F:\anaconda\envs\leo_semantic\python.exe scripts\10_profile_roi_compression.py --metadata data\roi_crops_gt\dota_v1_lite_300_100_100\val\roi_metadata_labeled.jsonl --checkpoint outputs\multi_exit\formal\best.pt --output-dir data\profiling\dota_v1_lite_300_100_100\val_strict_image_features --include-local --compression-levels 0 1 2 3 --exist-ok
+
+F:\anaconda\envs\leo_semantic\python.exe scripts\10_profile_roi_compression.py --metadata data\roi_crops_gt\dota_v1_lite_300_100_100\test\roi_metadata_labeled.jsonl --checkpoint outputs\multi_exit\formal\best.pt --output-dir data\profiling\dota_v1_lite_300_100_100\test_strict_image_features --include-local --compression-levels 0 1 2 3 --exist-ok
+```
+
+Expected row counts are:
+
+```text
+train: 386720
+val:   133120
+test:  136840
+```
+
+After profiling, compare the lightweight candidates:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\19_compare_quality_proxy_models.py --train-profile-csv data\profiling\dota_v1_lite_300_100_100\train_strict_image_features\roi_profile_smoke.csv --val-profile-csv data\profiling\dota_v1_lite_300_100_100\val_strict_image_features\roi_profile_smoke.csv --test-profile-csv data\profiling\dota_v1_lite_300_100_100\test_strict_image_features\roi_profile_smoke.csv --output-dir outputs\proxy\strict_image_features --model-types mlp hist_gbdt --exist-ok
+```
+
+Before starting this proxy comparison, report this runtime estimate:
+
+```text
+Strict proxy comparison estimate: about 2-10 minutes for mlp and hist_gbdt.
+```
+
+The comparison script copies the selected primary model to:
+
+```text
+outputs/proxy/strict_image_features/quality_proxy.joblib
+```
+
+Primary selection uses validation high-value MAE, validation R-squared, and
+validation threshold F1, with a 50 MB default model-size cap. Test metrics are
+reported after selection only; they must not be used to choose the primary
+model.
+
+Run deterministic sanity with the strict test profile and strict proxy:
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\16_run_deterministic_simulation.py --profile-csv data\profiling\dota_v1_lite_300_100_100\test_strict_image_features\roi_profile_smoke.csv --quality-proxy outputs\proxy\strict_image_features\quality_proxy.joblib --output-dir outputs\simulation\deterministic_strict_proxy_all --all-scenarios --exist-ok
+```
+
+The current top-k PPO result remains a candidate-generation ablation unless it
+is explicitly promoted to the method. Do not silently replace the paper-aligned
+legal action-space result with `feasible-topk`.
+
 ## Verification
 
 ```powershell
 F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -p test_quality_proxy.py -v
+F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -p test_quality_proxy_model_comparison.py -v
 F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -p test_roi_profiling.py -v
 F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -v
 ```

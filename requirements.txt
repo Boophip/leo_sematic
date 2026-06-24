@@ -1,0 +1,17 @@
+# Runtime and experiment dependencies for the LEO semantic scheduling project.
+# Verified against the local `leo_semantic` conda environment on 2026-06-22.
+numpy==2.0.1
+pandas==2.3.3
+pillow==11.1.0
+opencv-python==4.13.0.92
+PyYAML==6.0.3
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.4.67
+scikit-learn==1.7.2
+joblib==1.5.3
+gymnasium==1.2.3
+stable_baselines3==2.8.0
+matplotlib==3.10.9
+tensorboard==2.20.0
+tqdm==4.68.2

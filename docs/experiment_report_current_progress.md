@@ -1,297 +1,353 @@
-# LEO 遥感图像语义通信项目阶段性实验报告
+# LEO 遥感图像语义通信项目当前进展与下一步执行计划
 
-报告日期：2026-06-16
+报告日期：2026-06-22
 
-## 1. 实验背景与研究目标
+## 1. 当前判断
 
-本项目面向低轨卫星（LEO）遥感图像语义通信任务，目标是在带宽、算力和链路状态动态变化的条件下，以 ROI 为调度粒度，优先保障关键目标被及时、正确地处理。根据 `PROJECT_CONTEXT.md` 与 `project.pdf`，完整研究闭环包括：
+项目已经从早期“可信视觉数据”阶段推进到可运行的合成 LEO 链路调度闭环。现有代码已经覆盖：
 
 ```text
-DOTA 大幅遥感图像
-    -> 轻量级 ROI 检测
-    -> ROI 语义价值计算
+DOTA 原图级划分
+    -> 重叠切片与 YOLO-OBB 数据转换
+    -> 轻量 ROI 检测器训练和原图级恢复/NMS
+    -> ROI 元数据、裁剪、语义价值和 AoSI 网格输入
+    -> GT ROI crops
     -> 多出口任务模型
-    -> 离线 Profiling
-    -> MLP 任务质量代理
-    -> LEO 链路、队列与 AoSI 仿真
-    -> 强化学习联合调度
+    -> ROI x exit x compression profiling
+    -> MLP 质量代理
+    -> SNR-AMC、队列、能耗、AoSI 的确定性仿真
+    -> 单智能体 PPO smoke/pilot 与多场景聚合报告
 ```
 
-截至当前版本，项目已经完成并验证的重点集中在第一阶段“可信视觉数据”和 ROI 元数据生成：包括 DOTA 原图级数据划分、重叠切片、YOLO-OBB 数据转换、轻量旋转目标检测器训练与评估、切片检测结果恢复到原图坐标、全局旋转 NMS、ROI 语义价值与 AoSI 网格输入生成，以及基于 DOTA GT 的 ROI 离线质量标签。
+当前还不能把 PPO 结果作为论文最终正向结论。原因是：主论文一致的 `legal` candidate mode 已完成一次 3-seed formal run，但 Proposed-RL 仍未稳定优于强基线；质量代理测试集 `R2` 仍偏低；链路仍是可复现 synthetic trace，尚未接入 STK/TLE/ns-3 或真实轨道链路。
 
-本阶段修改性质属于“仅改变工程实现”和“实验基线输入生成”，未改变论文公式。
+本轮梳理和文档更新不改变论文公式，仅校正工程进展记录和下一步执行顺序。
 
-## 2. 原文思路对照
+## 2. 与 `project.pdf` 原文思路对照
 
-`project.pdf` 的核心工程取向是：使用轻量 ROI 检测器在源卫星侧先提取候选语义区域，避免传输完整大图；删除复杂的模型中间切分，只保留本地早退与跨星完整卸载；用离线 MLP 质量代理约束调度器，防止其为了降低时延和能耗而过度压缩或过早退出；用静态空间网格 AoSI 替代难以落地的目标级跨帧跟踪。
+当前实现与原文一致的关键点：
 
-当前代码实现与原文保持一致的部分包括：
+- 源卫星侧使用轻量 ROI 检测器，避免传输完整大图。
+- 删除模型中间切分，只保留本地早退和跨星完整卸载。
+- 本地动作不使用通信压缩，跨星卸载才遍历压缩等级。
+- 在线调度使用离线 profiling 和 MLP 质量代理，不在 RL step 内运行视觉模型。
+- 星间通信采用固定发射功率和 SNR-AMC 查表，不做每步连续功率凸优化。
+- 计算队列按固定频率演化，能耗按固定频率/固定发射功率建模。
+- AoSI 使用静态空间网格、概率 OR 网格价值和 soft reset，避免目标级跨帧跟踪假设。
+- 不可见链路作为非法动作处理，而不是用普通大时延代替。
 
-- 以 DOTA 原始大图为划分单位，避免切片后随机划分造成数据泄漏。
-- 使用 YOLO11n-OBB 作为轻量级旋转 ROI 检测器。
-- 将切片检测结果恢复到原图坐标后再做全局旋转框 NMS。
-- ROI 语义价值使用类别优先级、检测置信度和面积占比加权截断公式。
-- AoSI 网格基于原图坐标系的固定 8x8 网格，而不是检测切片网格。
-- ROI 离线标签只作为后续质量代理和 profiling 的监督信息，不把单个 ROI 质量称为 mAP。
+当前与原文目标仍有差距的部分：
 
-当前尚未实现的原文内容包括：多出口精细任务模型、压缩等级 profiling、MLP 质量代理、LEO 链路与 SNR-AMC 查表、计算队列/能耗模型、AoSI 跨时隙更新、PPO 或 MADRL 调度训练。因此本报告中的数值结论只覆盖视觉前端与 ROI 数据准备阶段。
+- 原文预期最终应有稳健的 Proposed-RL/MADRL 对比结论；当前只有单智能体 PPO pilot 和候选动作消融。
+- 原文提到更高保真在轨模拟；当前是 synthetic visibility/SNR trace。
+- 原文强调代理要可靠防止“过度压缩/过早退出作弊”；当前 MLP proxy 已接入，但精度还需要提高。
 
-## 3. 已完成代码与数据产物
+## 3. 已完成阶段与主要结果
 
-当前代码结构已经形成清晰的工程边界：
+### 3.1 DOTA 数据与 YOLO-OBB 前端
 
-| 位置 | 已有内容 | 作用 |
-|---|---|---|
-| `src/data/dota_lite_split.py` | DOTA 原图级子集划分 | 保证 train/val/test 按原图 ID 隔离 |
-| `src/data/dota_tiling.py` | 大图重叠切片与坐标映射 | 生成 1024 尺寸检测切片，并保留恢复信息 |
-| `src/data/dota_yolo_obb.py` | DOTA 切片转 YOLO-OBB 格式 | 生成 Ultralytics 可训练数据集 |
-| `src/detector/yolo_obb_reporting.py` | YOLO 训练报告汇总 | 固化模型参数、速度、指标与环境信息 |
-| `src/detector/dota_original_eval.py` | 原图级恢复、NMS 与 AP50 评估 | 将切片预测还原到 DOTA 原图评价口径 |
-| `src/data/roi_metadata.py` | ROI 元数据、语义价值、裁剪和网格汇总 | 生成调度环境的 ROI 输入 |
-| `src/data/roi_labeling.py` | ROI 与 DOTA GT 匹配标注 | 为后续质量代理/profiling 准备监督标签 |
-| `scripts/01` 到 `scripts/09` | 对应流水线入口 | 可复现实验步骤 |
-| `tests/` | 30 个单元测试 | 验证公式、边界和数据 schema |
+当前使用 DOTA-v1.0 可用训练图像构建 500 张原图子集，随机种子 42：
 
-## 4. 数据集准备
-
-当前使用 DOTA-v1.0 的可用训练图像构建了一个 500 张原图的实验子集，随机种子为 42，划分如下：
-
-| 划分 | 原图数 | 原始目标数 |
+| Split | 原图数 | 原始目标数 |
 |---|---:|---:|
 | train | 300 | 20741 |
 | val | 100 | 6922 |
 | test | 100 | 7003 |
 
-切片配置为 `tile_size=1024`、`overlap=200`、`min_visible_ratio=0.7`。切片后数据规模如下：
+切片配置为 `tile_size=1024`、`overlap=200`、`min_visible_ratio=0.7`：
 
-| 划分 | 切片数 | 原始目标数 | 被覆盖目标数 | 切片内目标数 | 空标签切片 |
-|---|---:|---:|---:|---:|---:|
-| train | 3926 | 20741 | 20724 | 38835 | 1615 |
-| val | 1295 | 6922 | 6917 | 12525 | 551 |
-| test | 1310 | 7003 | 7003 | 13912 | 580 |
-
-转换为 YOLO-OBB 后，过滤 `difficult=2` 的部分目标，保留用于检测训练的目标数如下：
-
-| 划分 | 图像数 | 保留目标数 | 空标签数 |
+| Split | 切片数 | 切片内目标数 | 空标签切片 |
 |---|---:|---:|---:|
-| train | 3926 | 36750 | 1720 |
-| val | 1295 | 11837 | 593 |
-| test | 1310 | 13182 | 617 |
+| train | 3926 | 38835 | 1615 |
+| val | 1295 | 12525 | 551 |
+| test | 1310 | 13912 | 580 |
 
-## 5. 检测器训练与评估
-
-### 5.1 过拟合冒烟实验
-
-项目先完成了 32 张图像的 YOLO11n-OBB 同集过拟合测试，用于确认数据格式、标注方向、类别顺序和训练脚本可用。该实验不是正式指标。验证结果为：
+YOLO11n-OBB test 切片级指标：
 
 | 指标 | 数值 |
 |---|---:|
-| Precision | 0.923 |
-| Recall | 0.962 |
-| mAP50 | 0.979 |
-| mAP50-95 | 0.866 |
+| Precision | 0.7655 |
+| Recall | 0.7037 |
+| mAP50 | 0.7209 |
+| mAP50-95 | 0.5450 |
+| 参数量 | 2.66M |
+| FLOPs | 16.83G |
+| 单切片推理 | 6.27 ms |
 
-该结果说明 YOLO-OBB 数据转换和训练链路基本正确。
-
-### 5.2 正式切片级训练
-
-正式模型使用 `yolo11n-obb.pt` 初始化，在 1024 切片上训练 100 epoch。模型参数量约 2.66M，计算量约 16.83 GFLOPs，最佳权重位于：
-
-```text
-outputs/detector/yolo11n_obb_full/weights/best.pt
-```
-
-验证集聚合结果：
+原图级恢复/NMS 后 test 指标：
 
 | 指标 | 数值 |
 |---|---:|
-| Precision | 0.803 |
-| Recall | 0.728 |
-| mAP50 | 0.775 |
-| mAP50-95 | 0.606 |
+| Precision | 0.3334 |
+| Recall | 0.9284 |
+| mAP50 | 0.6911 |
+| TP | 6352 |
+| FP | 12700 |
 
-独立 test 切片级结果：
+结论：检测前端已经达到高召回阶段目标，但假阳性仍偏多，会放大后续调度负载。
 
-| 指标 | 数值 |
-|---|---:|
-| Precision | 0.766 |
-| Recall | 0.704 |
-| mAP50 | 0.721 |
-| mAP50-95 | 0.545 |
+### 3.2 ROI 元数据、标签与 GT crops
 
-test 集单切片速度记录为：预处理 2.88 ms、推理 6.27 ms、后处理 3.12 ms。该速度是 Ultralytics 切片级评估环境下的统计值，可作为后续星载轻量检测开销建模的初步参考。
-
-![YOLO11n-OBB 训练曲线](../outputs/detector/yolo11n_obb_full/results.png)
-
-![YOLO11n-OBB 验证集 PR 曲线](../outputs/detector/yolo11n_obb_full/BoxPR_curve.png)
-
-![YOLO11n-OBB 归一化混淆矩阵](../outputs/detector/yolo11n_obb_full/confusion_matrix_normalized.png)
-
-![YOLO11n-OBB test 可视化预测样例](../outputs/detector/yolo11n_obb_full_test/val_batch0_pred.jpg)
-
-从类别表现看，切片级 test mAP50 较高的类别包括 plane 0.976、ship 0.960、large-vehicle 0.943、small-vehicle 0.917、tennis-court 0.901；较弱类别包括 helicopter 0.036、soccer-ball-field 0.307、roundabout 0.389。低样本类别与小目标/形态复杂类别仍是后续优化重点。
-
-## 6. 原图级恢复、NMS 与 ROI 质量
-
-为了符合论文中“切片只服务检测，AoSI 与 ROI 应回到原图/物理坐标系”的要求，项目实现了从切片预测到原图坐标的恢复，并对同一原图、同一类别执行全局旋转 NMS。
-
-原图级 DOTA-style AP50 本地评估配置：
-
-| 项 | 值 |
-|---|---|
-| split | test |
-| confidence | 0.001 |
-| tile_iou | 0.7 |
-| nms_iou | 0.1 |
-| eval_iou | 0.5 |
-| limit_images | null |
-
-原图级聚合结果：
-
-| 指标 | 数值 |
-|---|---:|
-| Precision | 0.333 |
-| Recall | 0.928 |
-| mAP50 | 0.691 |
-| True Positives | 6352 |
-| False Positives | 12700 |
-
-该结果体现了当前检测器前端偏向高召回。对于本项目而言，高召回是合理的阶段性目标，因为 ROI 一旦漏检，后续调度无法补救；但假阳性数量偏多会增加后续 profiling、质量代理和调度环境负载，后续需要通过阈值、NMS、类别校准或质量代理筛选继续控制。
-
-原图级召回表现较好的类别包括 large-vehicle 0.968、plane 0.966、basketball-court 0.962、small-vehicle 0.957、ship 0.947；较弱类别包括 helicopter 0.118、roundabout 0.565、soccer-ball-field 0.625。
-
-## 7. ROI 元数据与 AoSI 网格输入
-
-基于原图级 NMS 结果，当前已经生成 test split 的 ROI 元数据、旋转裁剪图像和 AoSI 网格汇总：
-
-```text
-data/roi_metadata/dota_demo_1024_o200/test/
-```
-
-生成规模：
+Detector ROI metadata 已生成：
 
 | 项 | 数值 |
 |---|---:|
-| 原图数 | 100 |
-| ROI 数 | 19185 |
-| 裁剪图数 | 19185 |
-| 网格单元数 | 6400 |
-| 非空网格单元数 | 3252 |
+| test 原图数 | 100 |
+| detector ROI 数 | 19185 |
+| ROI 裁剪图 | 19185 |
+| AoSI 网格单元 | 6400 |
+| 非空网格单元 | 3252 |
 
-ROI 元数据 schema 包括 `roi_id`、`image_id`、`source_image_path`、`crop_path`、`predicted_class`、`class_id`、`confidence`、`global_obb`、`center_x/y`、`area_ratio`、`grid_row/col/id`、`semantic_value`、`class_priority`、`difficult`、`source_tile_id`。
-
-当前语义价值公式与项目公式一致：
-
-```text
-v_k = clip(w_class * class_priority(y_k)
-           + w_confidence * confidence_k
-           + w_area * area_ratio_k,
-           0, 1)
-```
-
-当前权重为：
-
-| 权重 | 数值 |
-|---|---:|
-| w_class | 0.50 |
-| w_confidence | 0.35 |
-| w_area | 0.15 |
-
-AoSI 网格使用原图坐标系下的 8x8 固定网格，每个 ROI 按 OBB 中心点唯一归属。网格综合语义价值采用概率 OR 聚合：
-
-```text
-V_g = 1 - product(1 - v_k), k belongs to grid g
-```
-
-这部分实现为后续调度环境提供了可直接采样的 ROI 业务流和空间语义状态。
-
-## 8. ROI 离线质量标签
-
-项目已经实现了 ROI 与 DOTA 原始 GT 的旋转 IoU 匹配，阈值为 0.5。匹配策略采用 DOTA/VOC 风格的一对一匹配，并区分：
-
-- `true_positive`
-- `ignored_difficult`
-- `class_mismatch`
-- `background_fp`
-- `duplicate_detection`
-
-test split 的标签统计如下：
+ROI 与 DOTA GT 匹配标签：
 
 | 项 | 数值 |
 |---|---:|
 | ROI 总数 | 19185 |
 | GT 数 | 6842 |
-| ignored GT | 161 |
 | true_positive | 6352 |
 | false_positive | 12700 |
+| class_mismatch | 310 |
+| background_fp | 12390 |
 | ignored_prediction | 133 |
-| class_mismatch | 310 |
-| background_fp | 12390 |
-| matched_any_gt | 6795 |
-| class_correct | 6485 |
 
-质量标签分布：
+GT ROI crops 已按原图 split 隔离生成，用于监督多出口模型：
 
-| 标签 | 数量 |
+| Split | 图像数 | ROI crops |
+|---|---:|---:|
+| train | 299 | 19336 |
+| val | 100 | 6656 |
+| test | 100 | 6842 |
+
+### 3.3 多出口模型、Profiling 与质量代理
+
+多出口模型 formal baseline 已完成 20 epoch 训练。最佳 epoch 为 19，val mean accuracy 为 `0.7188`：
+
+| Exit | Val Accuracy |
 |---|---:|
-| true_positive | 6352 |
-| ignored_difficult | 133 |
-| class_mismatch | 310 |
-| background_fp | 12390 |
+| 1 | 0.4085 |
+| 2 | 0.7267 |
+| 3 | 0.8529 |
+| 4 | 0.8872 |
 
-这部分结果不应被解释为单 ROI mAP，而是后续多出口模型、压缩 profiling 和 MLP 质量代理的离线监督材料。
+Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + beta_0..3` 生成：
 
-## 9. 测试与可复现性
+| 项 | 数值 |
+|---|---:|
+| ROI 数 | 6842 |
+| Exit 数 | 4 |
+| 压缩/本地等级 | 5 |
+| profiling 行数 | 136840 |
 
-本次报告生成前运行了完整单元测试：
+质量代理当前输入排除了泄漏字段 `quality_label`、`task_quality`、`predicted_class_id`、`exit_confidence`。当前 `outputs/proxy/test_full/quality_proxy.joblib` 指标：
 
-```text
-python -m unittest discover -s tests -v
+| Split | MAE | MSE | R2 |
+|---|---:|---:|---:|
+| train | 0.1319 | 0.0380 | 0.6692 |
+| test | 0.1893 | 0.0687 | 0.4607 |
+
+结论：质量代理链路已经打通，但测试集解释力仍偏弱，应作为下一步优先优化对象。
+
+### 3.4 确定性卫星仿真
+
+`src/simulation/` 和 `src/envs/` 已实现并测试：
+
+- SNR-AMC 查表和通信时延。
+- 不可见链路非法动作。
+- 固定频率计算队列。
+- 计算能耗和通信能耗。
+- 网格 AoSI 价值、变化因子和 soft reset。
+- Random、Local-Deep、Local-Adaptive、Best-SNR、Semantic-Greedy、No-AoSI、AoSI-Greedy 基线。
+
+确定性四场景中，当前强基线表现如下：
+
+| Scenario | 当前最好基线 | QoE |
+|---|---|---:|
+| default | No-AoSI | -12.4728 |
+| low_snr | No-AoSI | -17.1291 |
+| compute_congested | Semantic-Greedy | -35.9335 |
+| tight_deadline | No-AoSI | -26.8795 |
+
+### 3.5 PPO Pilot 与候选动作实验
+
+已有 PPO smoke/pilot 和 formal experiment manager。当前主要 pilot 结果：
+
+| 设置 | 规模 | Proposed-RL 状态 |
+|---|---|---|
+| fixed action pilot | 2 seeds, 64 ROI, 128 timesteps | 明显弱于强基线 |
+| legal candidate pilot | 2 seeds, 128 ROI, 2048 timesteps | 合法动作执行稳定，但均值仍弱于 Semantic-Greedy |
+| legal candidate formal | 3 seeds, 512 ROI, 5000 timesteps | 合法动作执行稳定，但仍弱于 Semantic-Greedy/No-AoSI |
+| feasible-topk candidate pilot | 2 seeds, 128 ROI, 2048 timesteps | Proposed-RL 在 pilot 中最好，但属于候选生成消融 |
+| feasible-topk formal | 3 seeds, 512 ROI, 5000 timesteps | Proposed-RL 在消融设置下整体最好 |
+
+`legal` candidate pilot 结果：
+
+| Policy | Mean QoE | Mean Success | Mean Delay ms |
+|---|---:|---:|---:|
+| Semantic-Greedy | -6.9979 | 0.8691 | 268.37 |
+| Proposed-RL | -8.2969 | 0.7852 | 213.25 |
+| No-AoSI | -9.3731 | 0.8105 | 311.56 |
+
+`feasible-topk` candidate pilot 结果：
+
+| Policy | Mean QoE | Mean Success | Mean Delay ms |
+|---|---:|---:|---:|
+| Proposed-RL | -2.2353 | 0.9209 | 100.48 |
+| Semantic-Greedy | -6.9979 | 0.8691 | 268.37 |
+| No-AoSI | -9.3731 | 0.8105 | 311.56 |
+
+解释：`legal` 是更接近论文主方法的物理合法动作候选；`feasible-topk` 可以作为候选动作剪枝/生成消融，不应静默替代主方法。
+
+`legal` candidate formal run 已于 2026-06-22 完成，配置为 3 seeds、512 ROI、5000 timesteps/scenario、4 个 stress scenarios。脚本启动前给出的保守预估为 24-96 分钟，当前开发机实际约 3-4 分钟完成。聚合结果如下：
+
+| Policy | Mean QoE | Mean Rank | Best Count | Mean Success | Mean Delay ms | Executed Illegal |
+|---|---:|---:|---:|---:|---:|---:|
+| Semantic-Greedy | -7.8023 | 2.9167 | 0 | 0.9360 | 98.82 | 0 |
+| No-AoSI | -10.4192 | 2.4167 | 3 | 0.9214 | 112.85 | 0 |
+| Proposed-RL | -14.3282 | 4.3333 | 0 | 0.8449 | 83.49 | 0 |
+| AoSI-Greedy | -16.0707 | 2.7500 | 6 | 0.8965 | 150.86 | 0 |
+
+按场景看，Proposed-RL 对当前最好策略仍有差距：
+
+| Scenario | Best Policy | Best Mean QoE | PPO Mean QoE | PPO Mean Gap |
+|---|---|---:|---:|---:|
+| default | AoSI-Greedy | -2.9404 | -7.0047 | -4.0643 |
+| low_snr | AoSI-Greedy | -2.2056 | -8.7541 | -6.5485 |
+| compute_congested | Local-Adaptive | -13.5811 | -29.1026 | -15.5214 |
+| tight_deadline | No-AoSI | -1.6467 | -12.4516 | -10.8049 |
+
+结论：`legal` candidate mode 已证明不会执行物理非法卸载，但当前 PPO 训练目标和动作选择仍偏保守/不稳定。下一步不应把这个结果包装成主方法优势，而应先做 reward/observation/proxy 改进，或把 `feasible-topk` 作为候选生成消融单独报告。
+
+`feasible-topk` formal 消融也已于 2026-06-22 完成，配置同为 3 seeds、512 ROI、5000 timesteps/scenario、4 个 stress scenarios，区别是每步只保留 `drop + top-12` 个合法非丢弃候选动作。聚合结果如下：
+
+| Policy | Mean QoE | Mean Rank | Best Count | Mean Success | Mean Delay ms | Executed Illegal |
+|---|---:|---:|---:|---:|---:|---:|
+| Proposed-RL | -4.2465 | 1.9167 | 7 | 0.9258 | 53.18 | 0 |
+| Semantic-Greedy | -7.8023 | 3.5833 | 0 | 0.9360 | 98.82 | 0 |
+| No-AoSI | -10.4192 | 3.0000 | 1 | 0.9214 | 112.85 | 0 |
+| AoSI-Greedy | -16.0707 | 3.0833 | 4 | 0.8965 | 150.86 | 0 |
+
+按场景看：
+
+| Scenario | Best Policy | Best Mean QoE | PPO Mean QoE | PPO Mean Gap |
+|---|---|---:|---:|---:|
+| default | Proposed-RL | -2.0709 | -2.0709 | 0.0000 |
+| compute_congested | Proposed-RL | -7.3429 | -7.3429 | 0.0000 |
+| low_snr | AoSI-Greedy | -2.2056 | -5.7212 | -3.5156 |
+| tight_deadline | No-AoSI | -1.6467 | -1.8512 | -0.2045 |
+
+解释：top-k 候选剪枝显著改善了 PPO 可学习性，说明当前瓶颈很可能来自原始合法候选动作空间过宽和动作索引学习困难，而不只是奖励公式本身。不过该设置引入了启发式候选生成，论文表述必须标为 ablation/candidate-generation variant。
+
+## 4. 当前验证状态
+
+在项目专用环境中运行：
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -v
 ```
 
 结果：
 
 ```text
-Ran 30 tests in 0.580s
+Ran 87 tests in 4.541s
 OK
 ```
 
-测试覆盖内容包括：
+注意：不要使用系统默认 Python 直接跑测试；默认环境缺少 `torch`、`cv2`、`gymnasium`、`stable_baselines3`、`joblib`、`sklearn` 等依赖。
 
-- DOTA 子集划分的确定性、类别覆盖和数据隔离。
-- 切片坐标恢复、边界填充、部分目标裁剪和 `difficult` 标记。
-- YOLO-OBB 标签归一化、类别顺序和 smoke 数据选择。
-- 原图级坐标恢复、全局旋转 NMS、困难样本忽略、重复预测计数。
-- ROI 语义价值公式、面积占比、网格归属、概率 OR 聚合和裁剪输出。
-- ROI 标注的 TP、class mismatch、background FP 和 ignored difficult 逻辑。
+## 5. 下一步工作优先级
 
-## 10. 阶段性结论
+### P0：把当前状态固化为可复现基线
 
-当前项目已经完成从 DOTA 原图到调度可用 ROI 元数据的前端闭环。最重要的阶段性成果是：数据划分遵守原图隔离；检测器训练链路可用；切片预测可以恢复到原图坐标并进行全局旋转框 NMS；ROI 已经带有语义价值、网格归属、裁剪路径和离线质量标签。
+1. 更新阶段报告和下一步计划。
+   状态：本文件已更新。
 
-从实验结果看，切片级 YOLO-OBB 在 test 上达到 mAP50 0.721、mAP50-95 0.545；原图级恢复后的 AP50 为 0.691，召回率达到 0.928。该现象符合当前“先保障关键 ROI 不漏检”的阶段目标，但也暴露出假阳性偏多的问题，后续会直接影响 ROI 业务流规模和调度压力。
+2. 固化 Python/conda 环境依赖。
+   状态：已新增 `requirements.txt` 和 `environment.yml`，避免测试在默认 Python 中失败。
 
-当前尚不能宣称完成论文级联合调度实验，因为多出口模型、压缩 profiling、质量代理、LEO 链路队列仿真和强化学习策略尚未实现。下一阶段应优先沿着原文路线推进“多出口模型 + 压缩等级 profiling + MLP 质量代理”，使调度环境能够使用动作相关的质量预测，而不是固定质量或手工标签。
+3. 跑一遍完整测试。
+   状态：已用 `F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -v` 通过，`Ran 87 tests ... OK`。
 
-## 11. 后续建议
+### P1：提高质量代理可信度
 
-1. 在现有 ROI 裁剪集上构建多出口任务模型，输出每个出口的推理质量、置信度和时延。
-2. 对 ROI 裁剪图像执行多级压缩与缩放，生成 `ROI x exit x beta` profiling 表。
-3. 训练轻量 MLP 质量代理，并在独立 test split 上报告 MAE、MSE、R-squared 和分组误差。
-4. 用当前 ROI 元数据作为输入，建立最小可验证的确定性调度环境，先实现 SNR-AMC 查表、通信时延、计算队列和 AoSI 跨时隙更新。
-5. 在环境因果关系通过测试后，再训练 PPO 或后续 MADRL 策略，并与 Random、Local-Deep、Best-SNR、Semantic-Greedy、No-AoSI 等基线比较。
+1. 生成 train/val/test 分离的 profiling 表，而不是主要依赖 `test_full` 训练 proxy。
+   目的：让 proxy 训练、模型选择和最终调度评估边界更清楚。
 
-## 附录：主要产物路径
+2. 训练更稳健的 proxy baseline。
+   可尝试：更强 MLP、RandomForest/GradientBoosting 回归器、按类别/出口分组误差校准。
+
+3. 质量门槛：优先把 held-out `R2` 从当前 `0.4607` 提升到更可靠区间，同时观察 high-value ROI 分组误差。
+
+训练预估：单次 sklearn proxy 训练通常约 1-5 分钟；若重新生成大 profiling 表，取决于 GPU 和 ROI 数，预计 10-60 分钟。
+
+### P2：完成 paper-consistent PPO formal run
+
+主线命令建议：
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --candidate-mode legal --seeds 42 43 44 --limit-rois 512 --total-timesteps 5000 --eval-frequency 500 --checkpoint-frequency 1000 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_legal_formal --exist-ok
+```
+
+状态：已完成一次 `outputs\rl\ppo_legal_formal` run。启动前保守预估为 24-96 分钟，当前开发机实际约 3-4 分钟。
+
+验收重点：
+
+- `Proposed-RL` 没有在 `legal` candidate mode 下稳定接近或超过 `Semantic-Greedy`、`No-AoSI`。
+- 每个 scenario 已有 PPO rank、gap、success、timeout、quality violation 聚合报告。
+- `executed_illegal_count` 为 0，物理合法动作约束生效。
+- 后续应重点排查 reward shaping、candidate remap、proxy 误差和 AoSI 代价权重。
+
+### P3：保留 feasible-topk 作为消融
+
+当前 `feasible-topk` pilot 表现最好，但它把动作空间预先裁成 top-k 合法动作，因此应作为候选生成消融而不是默认主方法。
+
+正式消融命令建议：
+
+```powershell
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --candidate-mode feasible-topk --candidate-top-k 12 --seeds 42 43 44 --limit-rois 512 --total-timesteps 5000 --eval-frequency 500 --checkpoint-frequency 1000 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_topk_formal --exist-ok
+```
+
+状态：已完成一次 `outputs\rl\ppo_topk_formal` run。结果显示 Proposed-RL 在候选剪枝消融中整体最好，但 `low_snr` 场景仍输给 AoSI-Greedy。
+
+### P4：视觉前端和高保真链路增强
+
+1. 检测器校准：针对原图级高 FP，调整 confidence/NMS 或做类别校准。
+   目标：不显著损失高价值类别 recall 的前提下降低 ROI 流量。
+
+2. 高保真链路：接入 STK/TLE/ns-3 或真实轨道链路表。
+   当前 synthetic trace 足以验证因果闭环，但不等价于在轨物理实验。
+
+3. 论文图表：在 formal run 完成后生成 QoE、success、delay、energy、AoSI、traffic、CDF、training curve 和场景热力图。
+
+## 6. 立即执行记录
+
+本轮已经开始执行 P0：
+
+- 重新梳理并更新当前阶段报告。
+- 新增 `requirements.txt` 和 `environment.yml`，固化当前 `leo_semantic` 环境的核心运行依赖。
+- 明确 `legal` 是主论文一致候选动作设置，`feasible-topk` 是消融设置。
+- 把后续训练命令和训练时间预估写入报告。
+- 已执行 `ppo_legal_formal` dry-run，确认 3 seeds x 4 scenarios 的训练命令能正确构造；预计耗时约 24-96 分钟。
+- 已完成 `ppo_legal_formal` 正式运行并写入聚合报告；结果显示 Proposed-RL 在合法候选主设置下仍落后于强启发式基线。
+
+下一步建议回到 `legal` 主设置改进 reward、候选动作表达和 proxy。top-k 结果可作为候选生成消融支持“动作空间剪枝有助于 PPO 学习”的论点，但不能静默替代主方法。
+
+## 7. 主要产物路径
 
 | 产物 | 路径 |
 |---|---|
 | DOTA 子集摘要 | `data/DOTA-demo/summary.json` |
 | 切片摘要 | `data/tiles/dota_demo_1024_o200/summary.json` |
 | YOLO-OBB 数据集配置 | `data/yolo_obb/dota_demo_1024_o200/dataset.yaml` |
-| 正式检测器权重 | `outputs/detector/yolo11n_obb_full/weights/best.pt` |
-| 切片级 test 评估报告 | `outputs/detector/yolo11n_obb_full_test/evaluation_report.json` |
+| 检测器权重 | `outputs/detector/yolo11n_obb_full/weights/best.pt` |
 | 原图级评估报告 | `outputs/detector/yolo11n_obb_full_test_original/original_eval_report.json` |
-| 原图级 NMS 预测 | `outputs/detector/yolo11n_obb_full_test_original/nms_predictions.jsonl` |
-| ROI 元数据 | `data/roi_metadata/dota_demo_1024_o200/test/roi_metadata.jsonl` |
-| ROI 标注数据 | `data/roi_metadata/dota_demo_1024_o200/test/roi_metadata_labeled.jsonl` |
-| ROI 网格汇总 | `data/roi_metadata/dota_demo_1024_o200/test/grid_summary.json` |
+| Detector ROI 元数据 | `data/roi_metadata/dota_demo_1024_o200/test/roi_metadata.jsonl` |
+| Detector ROI 标注 | `data/roi_metadata/dota_demo_1024_o200/test/roi_metadata_labeled.jsonl` |
+| GT ROI crops | `data/roi_crops_gt/dota_v1_lite_300_100_100/{train,val,test}/roi_metadata_labeled.jsonl` |
+| 多出口 formal 权重 | `outputs/multi_exit/formal/best.pt` |
+| Profiling 表 | `data/profiling/dota_v1_lite_300_100_100/test_full/roi_profile_smoke.csv` |
+| 质量代理 | `outputs/proxy/test_full/quality_proxy.joblib` |
+| 确定性仿真报告 | `outputs/simulation/deterministic/comparison_report.md` |
+| PPO legal pilot | `outputs/rl/ppo_candidate_legal_pilot/comparison_report.md` |
+| PPO top-k pilot | `outputs/rl/ppo_candidate_topk_pilot/comparison_report.md` |
+| PPO legal formal | `outputs/rl/ppo_legal_formal/comparison_report.md` |
+| PPO top-k formal | `outputs/rl/ppo_topk_formal/comparison_report.md` |
