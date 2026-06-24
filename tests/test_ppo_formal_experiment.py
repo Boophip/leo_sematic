@@ -10,6 +10,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PpoFormalExperimentTests(unittest.TestCase):
+    def test_default_candidate_mode_is_feasible_topk_main_method(self) -> None:
+        runner = _load_runner_module()
+        original_argv = sys.argv
+        try:
+            sys.argv = ["18_run_ppo_formal_experiment.py"]
+            args = runner.parse_args()
+        finally:
+            sys.argv = original_argv
+
+        self.assertEqual(args.candidate_mode, "feasible-topk")
+        self.assertEqual(args.candidate_top_k, 12)
+
     def test_formal_aggregate_computes_policy_mean_std_and_scenario_summary(self) -> None:
         runner = _load_runner_module()
         seed_results = [

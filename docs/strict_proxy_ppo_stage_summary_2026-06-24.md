@@ -25,9 +25,9 @@ strict proxy + feasible-topk(k=12) + shaping + 100k
 | Mean AoSI Cost | 115.4084 |
 | Executed Illegal Count | 0.0000 |
 
-结论：100k shaping 通过当前 gate，可以进入论文级结果整理、图表生成和方法边界确认阶段。
+结论：100k shaping 通过当前 gate，可以进入论文级结果整理和图表生成阶段。
 
-注意：`feasible-topk` 仍应表述为候选动作生成/剪枝机制，不能静默替代 paper-consistent 的 `legal` 全动作空间设定。如果后续把它放入主方法，方法章节必须显式说明候选生成逻辑。
+方法边界已经明确：`feasible-topk` 纳入论文主方法，作为 `Proxy-Guided Feasible Top-k PPO` 的候选动作生成模块。它不是 full legal action-space PPO 的静默替代，而是显式的物理可行性过滤与代理引导 top-k 候选约简。`legal` 全动作空间 PPO 保留为消融/压力对照，用于说明没有候选生成时 PPO 学习难度显著增大。
 
 ## 2. Strict Proxy 与数据边界
 
@@ -98,6 +98,7 @@ limit_rois: 512
 | 20k no-shaping | 1.5833 | 8 / 12 | -4.5904 | -1.3072 | 0.9102 | 70.3923 | 122.0366 | 0.0000 |
 | 20k shaping | 1.5833 | 8 / 12 | -2.9935 | -0.3312 | 0.9520 | 64.9870 | 117.6277 | 0.0000 |
 | 50k shaping | 1.1667 | 11 / 12 | -2.2025 | -0.0812 | 0.9574 | 63.3821 | 115.9574 | 0.0000 |
+| 100k no-shaping | 1.0833 | 11 / 12 | -2.1354 | -0.0260 | 0.9478 | 62.8920 | 116.8893 | 0.0000 |
 | 100k shaping | 1.0000 | 12 / 12 | -2.0784 | 0.0000 | 0.9583 | 63.2113 | 115.4084 | 0.0000 |
 
 100k 场景级结果：
@@ -120,10 +121,25 @@ limit_rois: 512
 | Mean Success | 0.9574 | 0.9583 | better |
 | Low-SNR Gap | -0.2569 | 0.0000 | better |
 
+100k shaping 与 100k no-shaping 对照：
+
+| Metric | 100k no-shaping | 100k shaping | Direction |
+|---|---:|---:|---|
+| Mean Rank | 1.0833 | 1.0000 | shaping better |
+| Best Count | 11 / 12 | 12 / 12 | shaping better |
+| Mean QoE | -2.1354 | -2.0784 | shaping better |
+| Mean Gap | -0.0260 | 0.0000 | shaping better |
+| Mean Success | 0.9478 | 0.9583 | shaping better |
+| Mean Delay ms | 62.8920 | 63.2113 | no-shaping slightly lower |
+| Mean AoSI Cost | 116.8893 | 115.4084 | shaping better |
+
+结论：no-shaping 100k 仍显著优于强基线，但略弱于 100k shaping。当前论文主结果建议保留 `strict proxy + feasible-topk(k=12) + shaping + 100k`，并将 no-shaping 100k 作为训练奖励消融。
+
 主要产物：
 
 ```text
 outputs/rl/ppo_topk_strict_proxy_no_shaping_20k/summary.json
+outputs/rl/ppo_topk_strict_proxy_no_shaping_100k/summary.json
 outputs/rl/ppo_topk_strict_proxy_shaping_20k/summary.json
 outputs/rl/ppo_topk_strict_proxy_shaping_50k/summary.json
 outputs/rl/ppo_topk_strict_proxy_shaping_100k/summary.json
@@ -162,12 +178,13 @@ outputs/simulation/deterministic_strict_proxy_all/summary_all.json
 
 - strict proxy 的训练、验证、测试边界已收紧到 image-level train/val/test split。
 - primary proxy 是轻量 MLP，体积远低于 50 MB，test R2 约 0.8023。
+- Proxy-Guided Feasible Top-k PPO 是当前主方法：先过滤物理非法动作，再按质量代理、时延和通信字节数保留 top-k 候选，最后由 PPO 在候选集合内学习长期调度。
 - feasible-topk + shaping 的 PPO 学习曲线和多 seed formal 结果随 20k -> 50k -> 100k 稳定增强。
 - 100k shaping 在当前 synthetic deterministic stress scenarios 下实现 12/12 best，并且无 executed illegal action。
 
 暂时不应过度表述的内容：
 
-- 不应把 `feasible-topk` 静默写成原始 `legal` 全动作空间主方法。
+- 不应把 `feasible-topk` 结果写成原始 full `legal` 全动作空间 PPO 的胜利。
 - 不应把 synthetic visibility/SNR trace 表述为 STK/TLE/ns-3 高保真链路结果。
 - 不应把 deterministic No-AoSI sanity 与 PPO formal result 混成同一评估口径。
 - 不应声称已经完成 MADRL 或多智能体扩展。
@@ -175,9 +192,11 @@ outputs/simulation/deterministic_strict_proxy_all/summary_all.json
 建议论文方法章节表述：
 
 ```text
-We evaluate a candidate-action pruning variant, feasible-topk, where the policy
-selects from a compact set of feasible actions ranked by proxy-estimated utility.
-This variant is reported separately from the full legal action-space setting.
+We propose a proxy-guided feasible top-k candidate generation mechanism that
+first filters physically invalid actions and then ranks feasible local/offloading
+actions using proxy-estimated task quality, delay, and communication cost. The
+PPO policy selects from this compact candidate set to optimize long-term queue,
+delay, energy, and AoSI-aware objectives.
 ```
 
 ## 6. 下一阶段建议
@@ -188,11 +207,12 @@ P0：论文级结果固化
 - 生成 QoE、success、delay、energy、AoSI、CDF、training curve 的最终图表。
 - 将 100k shaping 作为当前 top-k candidate-generation 路线的候选最终规模。
 
-P1：方法边界确认
+P1：方法边界落地
 
-- 决定 `feasible-topk` 是主方法的一部分，还是作为候选生成扩展/消融单独汇报。
-- 如果纳入主方法，必须在方法章节明确候选集生成与 top-k 选择规则。
-- 保留 `legal` 结果作为全动作空间学习困难的对照，不包装成正向主结论。
+- 将 `feasible-topk` 写入方法章节，命名为 Proxy-Guided Feasible Top-k PPO。
+- 明确候选集生成与 top-k 选择规则。
+- 保留 `legal` 结果作为全动作空间学习困难的对照，不包装成主结果。
+- 补跑 strict proxy + feasible-topk + no-shaping 的更大规模对照，确认 shaping/no-shaping 取舍。
 
 P2：论文风险补强
 

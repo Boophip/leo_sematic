@@ -16,7 +16,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.envs import CANDIDATE_MODE_FIXED, CANDIDATE_MODES  # noqa: E402
+from src.envs import CANDIDATE_MODE_FEASIBLE_TOPK, CANDIDATE_MODES  # noqa: E402
 from src.simulation.episode import SCENARIO_NAMES  # noqa: E402
 
 
@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-quality-deficit-weight", type=float, default=0.0)
     parser.add_argument("--reward-delay-excess-weight", type=float, default=0.0)
     parser.add_argument("--reward-virtual-queue-weight", type=float, default=0.0)
-    parser.add_argument("--candidate-mode", choices=CANDIDATE_MODES, default=CANDIDATE_MODE_FIXED)
+    parser.add_argument("--candidate-mode", choices=CANDIDATE_MODES, default=CANDIDATE_MODE_FEASIBLE_TOPK)
     parser.add_argument("--candidate-top-k", type=int, default=12)
     parser.add_argument("--exist-ok", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

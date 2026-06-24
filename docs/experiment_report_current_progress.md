@@ -1,6 +1,6 @@
 # LEO 遥感图像语义通信项目当前进展与下一步执行计划
 
-报告日期：2026-06-22
+报告日期：2026-06-24
 
 ## 1. 当前判断
 
@@ -19,9 +19,11 @@ DOTA 原图级划分
     -> 单智能体 PPO smoke/pilot 与多场景聚合报告
 ```
 
-当前还不能把 PPO 结果作为论文最终正向结论。原因是：主论文一致的 `legal` candidate mode 已完成一次 3-seed formal run，但 Proposed-RL 仍未稳定优于强基线；质量代理测试集 `R2` 仍偏低；链路仍是可复现 synthetic trace，尚未接入 STK/TLE/ns-3 或真实轨道链路。
+当前已经完成 strict train/val/test 隔离质量代理，以及 strict proxy 下 `feasible-topk(k=12)` PPO 的 20k/50k/100k formal run。方法边界已经调整：`feasible-topk` 纳入论文主方法，作为 Proxy-Guided Feasible Top-k PPO 的候选动作生成模块；`legal` 全动作空间 PPO 保留为消融/压力对照。
 
-本轮梳理和文档更新不改变论文公式，仅校正工程进展记录和下一步执行顺序。
+当前仍不能过度表述的部分是：链路仍是可复现 synthetic trace，尚未接入 STK/TLE/ns-3 或真实轨道链路；当前实现仍是单智能体 PPO，不能声称已经完成 MADRL。
+
+本轮梳理和文档更新不改变论文公式、QoE 定义、AoSI 定义或动作语义，仅明确主方法的候选动作生成机制。
 
 ## 2. 与 `project.pdf` 原文思路对照
 
@@ -38,9 +40,9 @@ DOTA 原图级划分
 
 当前与原文目标仍有差距的部分：
 
-- 原文预期最终应有稳健的 Proposed-RL/MADRL 对比结论；当前只有单智能体 PPO pilot 和候选动作消融。
+- 原文预期最终应有稳健的 Proposed-RL/MADRL 对比结论；当前是单智能体 Proxy-Guided Feasible Top-k PPO，还未升级为 MADRL。
 - 原文提到更高保真在轨模拟；当前是 synthetic visibility/SNR trace。
-- 原文强调代理要可靠防止“过度压缩/过早退出作弊”；当前 MLP proxy 已接入，但精度还需要提高。
+- 原文强调代理要可靠防止“过度压缩/过早退出作弊”；当前 strict image-feature MLP proxy 已显著改善，但仍需在论文中说明 top-1 action agreement 并非 oracle 级别。
 
 ## 3. 已完成阶段与主要结果
 
@@ -129,23 +131,25 @@ GT ROI crops 已按原图 split 隔离生成，用于监督多出口模型：
 | 3 | 0.8529 |
 | 4 | 0.8872 |
 
-Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + beta_0..3` 生成：
+Profiling 已用 GT ROI crops、formal multi-exit checkpoint 和 `local + beta_0..3` 生成，并已经切换到严格 image-level train/val/test 隔离版本：
 
 | 项 | 数值 |
 |---|---:|
-| ROI 数 | 6842 |
+| train profiling 行数 | 386720 |
+| val profiling 行数 | 133120 |
+| test profiling 行数 | 136840 |
 | Exit 数 | 4 |
 | 压缩/本地等级 | 5 |
-| profiling 行数 | 136840 |
 
-质量代理当前输入排除了泄漏字段 `quality_label`、`task_quality`、`predicted_class_id`、`exit_confidence`。当前 `outputs/proxy/test_full/quality_proxy.joblib` 指标：
+质量代理当前输入排除了泄漏字段 `quality_label`、`task_quality`、`predicted_class_id`、`exit_confidence`。当前 `outputs/proxy/strict_image_features/quality_proxy.joblib` 指标：
 
 | Split | MAE | MSE | R2 |
 |---|---:|---:|---:|
-| train | 0.1319 | 0.0380 | 0.6692 |
-| test | 0.1893 | 0.0687 | 0.4607 |
+| train | 0.0554 | 0.0097 | 0.9141 |
+| val | 0.0905 | 0.0253 | 0.7822 |
+| test | 0.0850 | 0.0234 | 0.8023 |
 
-结论：质量代理链路已经打通，但测试集解释力仍偏弱，应作为下一步优先优化对象。
+结论：质量代理链路已经从 metadata-only baseline 升级到 strict image-feature MLP。测试集解释力已达到当前论文级结果整理门槛，但 action top-1 agreement 仍不是 oracle 级别，因此候选生成和 PPO 学习仍需要共同发挥作用。
 
 ### 3.4 确定性卫星仿真
 
@@ -175,9 +179,9 @@ Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + b
 |---|---|---|
 | fixed action pilot | 2 seeds, 64 ROI, 128 timesteps | 明显弱于强基线 |
 | legal candidate pilot | 2 seeds, 128 ROI, 2048 timesteps | 合法动作执行稳定，但均值仍弱于 Semantic-Greedy |
-| legal candidate formal | 3 seeds, 512 ROI, 5000 timesteps | 合法动作执行稳定，但仍弱于 Semantic-Greedy/No-AoSI |
-| feasible-topk candidate pilot | 2 seeds, 128 ROI, 2048 timesteps | Proposed-RL 在 pilot 中最好，但属于候选生成消融 |
-| feasible-topk formal | 3 seeds, 512 ROI, 5000 timesteps | Proposed-RL 在消融设置下整体最好 |
+| legal candidate formal | 3 seeds, 512 ROI, 5000 timesteps | 作为 full action-space 对照，合法动作执行稳定，但仍弱于 Semantic-Greedy/No-AoSI |
+| feasible-topk candidate pilot | 2 seeds, 128 ROI, 2048 timesteps | Proposed-RL 在 pilot 中最好，推动其升级为主方法候选生成机制 |
+| feasible-topk formal | 3 seeds, 512 ROI, 5000 timesteps | 早期 top-k formal 整体最好，但仍使用旧 proxy/短训练预算 |
 
 `legal` candidate pilot 结果：
 
@@ -195,7 +199,7 @@ Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + b
 | Semantic-Greedy | -6.9979 | 0.8691 | 268.37 |
 | No-AoSI | -9.3731 | 0.8105 | 311.56 |
 
-解释：`legal` 是更接近论文主方法的物理合法动作候选；`feasible-topk` 可以作为候选动作剪枝/生成消融，不应静默替代主方法。
+解释：这一轮历史结果说明，完整合法动作空间虽然能保证不执行不可见链路卸载，但 PPO 学习难度过高；`feasible-topk` 显著降低动作空间复杂度，因此后续将其明确纳入主方法，而不是静默替代 full legal PPO。
 
 `legal` candidate formal run 已于 2026-06-22 完成，配置为 3 seeds、512 ROI、5000 timesteps/scenario、4 个 stress scenarios。脚本启动前给出的保守预估为 24-96 分钟，当前开发机实际约 3-4 分钟完成。聚合结果如下：
 
@@ -215,9 +219,9 @@ Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + b
 | compute_congested | Local-Adaptive | -13.5811 | -29.1026 | -15.5214 |
 | tight_deadline | No-AoSI | -1.6467 | -12.4516 | -10.8049 |
 
-结论：`legal` candidate mode 已证明不会执行物理非法卸载，但当前 PPO 训练目标和动作选择仍偏保守/不稳定。下一步不应把这个结果包装成主方法优势，而应先做 reward/observation/proxy 改进，或把 `feasible-topk` 作为候选生成消融单独报告。
+结论：`legal` candidate mode 已证明不会执行物理非法卸载，但 PPO 在 full legal action-space 下仍偏保守/不稳定。该结果保留为主方法的压力对照，用于支撑候选动作生成的必要性。
 
-`feasible-topk` formal 消融也已于 2026-06-22 完成，配置同为 3 seeds、512 ROI、5000 timesteps/scenario、4 个 stress scenarios，区别是每步只保留 `drop + top-12` 个合法非丢弃候选动作。聚合结果如下：
+`feasible-topk` 早期 formal 已于 2026-06-22 完成，配置同为 3 seeds、512 ROI、5000 timesteps/scenario、4 个 stress scenarios，区别是每步只保留 `drop + top-12` 个合法非丢弃候选动作。聚合结果如下：
 
 | Policy | Mean QoE | Mean Rank | Best Count | Mean Success | Mean Delay ms | Executed Illegal |
 |---|---:|---:|---:|---:|---:|---:|
@@ -235,7 +239,55 @@ Profiling 已用 test GT ROI crops、formal multi-exit checkpoint 和 `local + b
 | low_snr | AoSI-Greedy | -2.2056 | -5.7212 | -3.5156 |
 | tight_deadline | No-AoSI | -1.6467 | -1.8512 | -0.2045 |
 
-解释：top-k 候选剪枝显著改善了 PPO 可学习性，说明当前瓶颈很可能来自原始合法候选动作空间过宽和动作索引学习困难，而不只是奖励公式本身。不过该设置引入了启发式候选生成，论文表述必须标为 ablation/candidate-generation variant。
+解释：top-k 候选生成显著改善了 PPO 可学习性，说明当前瓶颈很可能来自原始合法候选动作空间过宽和动作索引学习困难，而不只是奖励公式本身。该机制已经升级为主方法的候选动作生成模块。
+
+### 3.6 Strict Proxy 主方法 Formal 结果
+
+6 月 24 日已完成 strict proxy + feasible-topk 的 20k/50k/100k formal run。所有 run 使用：
+
+```text
+profile: data/profiling/dota_v1_lite_300_100_100/test_strict_image_features/roi_profile_smoke.csv
+proxy: outputs/proxy/strict_image_features/quality_proxy.joblib
+candidate mode: feasible-topk
+candidate top-k: 12
+seeds: 42, 43, 44
+scenarios: default, low_snr, compute_congested, tight_deadline
+limit_rois: 512
+```
+
+当前主结果配置：
+
+```text
+strict proxy + feasible-topk(k=12) + shaping + 100k
+```
+
+聚合结果：
+
+| Policy | Mean Rank | Best Count | Mean QoE | Mean Success | Mean Delay ms | Mean AoSI Cost | Executed Illegal |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Proposed-RL | 1.0000 | 12 / 12 | -2.0784 | 0.9583 | 63.2113 | 115.4084 | 0.0000 |
+| No-AoSI | 2.7500 | 0 / 12 | -10.9356 | 0.9092 | 108.9976 | 122.1974 | 0.0000 |
+| Semantic-Greedy | 4.1667 | 0 / 12 | -16.3247 | 0.8608 | 113.4274 | 137.3001 | 0.0000 |
+
+no-shaping 100k 对照也已完成，训练前脚本保守估计为 24-96 分钟，实际本机约 44.9 分钟。结果如下：
+
+| Run | Mean Rank | Best Count | Mean QoE | Mean Gap | Mean Success | Mean Delay ms | Mean AoSI Cost | Executed Illegal |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100k no-shaping | 1.0833 | 11 / 12 | -2.1354 | -0.0260 | 0.9478 | 62.8920 | 116.8893 | 0.0000 |
+| 100k shaping | 1.0000 | 12 / 12 | -2.0784 | 0.0000 | 0.9583 | 63.2113 | 115.4084 | 0.0000 |
+
+结论：no-shaping 100k 仍然明显优于强基线，但略弱于 shaping。当前论文主结果继续使用 `strict proxy + feasible-topk(k=12) + shaping + 100k`；no-shaping 100k 作为训练奖励消融。
+
+场景级结果：
+
+| Scenario | Best Policy | Proposed-RL QoE | Proposed-RL Rank | Gap |
+|---|---|---:|---:|---:|
+| compute_congested | Proposed-RL | -6.2276 | 1.0000 | 0.0000 |
+| default | Proposed-RL | -0.6667 | 1.0000 | 0.0000 |
+| low_snr | Proposed-RL | -1.0817 | 1.0000 | 0.0000 |
+| tight_deadline | Proposed-RL | -0.3374 | 1.0000 | 0.0000 |
+
+结论：Proxy-Guided Feasible Top-k PPO 已经给出当前可写入论文主结果的正向证据。full `legal` PPO 作为对照，说明候选动作生成不是装饰性技巧，而是星载大动作空间下提高学习效率的核心机制。
 
 ## 4. 当前验证状态
 
@@ -267,56 +319,49 @@ OK
 3. 跑一遍完整测试。
    状态：已用 `F:\anaconda\envs\leo_semantic\python.exe -m unittest discover -s tests -v` 通过，`Ran 87 tests ... OK`。
 
-### P1：提高质量代理可信度
+### P1：固化 Proxy-Guided Feasible Top-k PPO 主方法
 
-1. 生成 train/val/test 分离的 profiling 表，而不是主要依赖 `test_full` 训练 proxy。
-   目的：让 proxy 训练、模型选择和最终调度评估边界更清楚。
+1. 将 `feasible-topk` 写入方法章节，作为主方法的候选动作生成模块。
+   状态：已新增 `docs/feasible_topk_main_method.md`。
 
-2. 训练更稳健的 proxy baseline。
-   可尝试：更强 MLP、RandomForest/GradientBoosting 回归器、按类别/出口分组误差校准。
+2. 明确候选生成规则：先过滤物理非法动作，再按 proxy 质量、时延和通信字节数保留 top-k。
+   状态：已在方法说明与 pipeline 文档中固定。
 
-3. 质量门槛：优先把 held-out `R2` 从当前 `0.4607` 提升到更可靠区间，同时观察 high-value ROI 分组误差。
+3. 保留 `legal` 全动作空间 PPO 作为消融/压力对照。
+   目的：证明候选生成机制对 PPO 学习效率是必要的，而不是结果包装。
 
-训练预估：单次 sklearn proxy 训练通常约 1-5 分钟；若重新生成大 profiling 表，取决于 GPU 和 ROI 数，预计 10-60 分钟。
+### P2：论文级结果图表与报告
 
-### P2：完成 paper-consistent PPO formal run
+1. 汇总 strict proxy、deterministic sanity、20k/50k/100k PPO 和 no-shaping 对照。
+2. 生成和检查 QoE、success、delay、energy、AoSI、CDF、training curve 图表。
+3. 用 `outputs/rl/ppo_topk_strict_proxy_shaping_100k` 作为当前主结果目录。
 
-主线命令建议：
+### P3：补跑 no-shaping 更大规模对照
+
+为了确认 shaping/no-shaping 取舍，建议补跑 strict proxy + feasible-topk + no-shaping 的 100k formal：
 
 ```powershell
-F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --candidate-mode legal --seeds 42 43 44 --limit-rois 512 --total-timesteps 5000 --eval-frequency 500 --checkpoint-frequency 1000 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_legal_formal --exist-ok
+F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --candidate-mode feasible-topk --candidate-top-k 12 --seeds 42 43 44 --limit-rois 512 --total-timesteps 100000 --eval-frequency 2000 --checkpoint-frequency 20000 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --profile-csv data\profiling\dota_v1_lite_300_100_100\test_strict_image_features\roi_profile_smoke.csv --quality-proxy outputs\proxy\strict_image_features\quality_proxy.joblib --output-dir outputs\rl\ppo_topk_strict_proxy_no_shaping_100k --exist-ok
 ```
 
-状态：已完成一次 `outputs\rl\ppo_legal_formal` run。启动前保守预估为 24-96 分钟，当前开发机实际约 3-4 分钟。
+状态：已完成。训练前脚本保守估计约 24-96 分钟，实际本机约 44.9 分钟。
 
 验收重点：
 
-- `Proposed-RL` 没有在 `legal` candidate mode 下稳定接近或超过 `Semantic-Greedy`、`No-AoSI`。
-- 每个 scenario 已有 PPO rank、gap、success、timeout、quality violation 聚合报告。
-- `executed_illegal_count` 为 0，物理合法动作约束生效。
-- 后续应重点排查 reward shaping、candidate remap、proxy 误差和 AoSI 代价权重。
+- 与 100k shaping 对比 mean QoE、mean success、quality violation 和 timeout。
+- no-shaping 100k 的 mean rank 为 1.0833、best count 为 11/12、mean QoE 为 -2.1354，略弱于 shaping 100k。
+- 当前论文主结果保留 shaping，no-shaping 作为训练奖励消融。
 
-### P3：保留 feasible-topk 作为消融
+### P4：论文风险补强
 
-当前 `feasible-topk` pilot 表现最好，但它把动作空间预先裁成 top-k 合法动作，因此应作为候选生成消融而不是默认主方法。
-
-正式消融命令建议：
-
-```powershell
-F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py --candidate-mode feasible-topk --candidate-top-k 12 --seeds 42 43 44 --limit-rois 512 --total-timesteps 5000 --eval-frequency 500 --checkpoint-frequency 1000 --select-best-checkpoint --best-checkpoint-min-success-rate 0.5 --ppo-ent-coef 0.01 --reward-quality-deficit-weight 0.5 --reward-delay-excess-weight 0.5 --reward-virtual-queue-weight 0.1 --output-dir outputs\rl\ppo_topk_formal --exist-ok
-```
-
-状态：已完成一次 `outputs\rl\ppo_topk_formal` run。结果显示 Proposed-RL 在候选剪枝消融中整体最好，但 `low_snr` 场景仍输给 AoSI-Greedy。
-
-### P4：视觉前端和高保真链路增强
-
-1. 检测器校准：针对原图级高 FP，调整 confidence/NMS 或做类别校准。
+1. strict split 防泄漏说明：proxy selection 只看 val，test 只做 final report。
+2. synthetic trace 限制说明：当前结果不是 STK/TLE/ns-3 高保真链路。
+3. 单智能体边界说明：当前不是 MADRL。
+4. 检测器校准：针对原图级高 FP，调整 confidence/NMS 或做类别校准。
    目标：不显著损失高价值类别 recall 的前提下降低 ROI 流量。
 
-2. 高保真链路：接入 STK/TLE/ns-3 或真实轨道链路表。
+5. 高保真链路：接入 STK/TLE/ns-3 或真实轨道链路表。
    当前 synthetic trace 足以验证因果闭环，但不等价于在轨物理实验。
-
-3. 论文图表：在 formal run 完成后生成 QoE、success、delay、energy、AoSI、traffic、CDF、training curve 和场景热力图。
 
 ## 6. 立即执行记录
 
@@ -324,12 +369,14 @@ F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py
 
 - 重新梳理并更新当前阶段报告。
 - 新增 `requirements.txt` 和 `environment.yml`，固化当前 `leo_semantic` 环境的核心运行依赖。
-- 明确 `legal` 是主论文一致候选动作设置，`feasible-topk` 是消融设置。
+- 明确 `feasible-topk` 是主方法候选动作生成模块，`legal` 是 full action-space 消融/压力对照。
 - 把后续训练命令和训练时间预估写入报告。
 - 已执行 `ppo_legal_formal` dry-run，确认 3 seeds x 4 scenarios 的训练命令能正确构造；预计耗时约 24-96 分钟。
-- 已完成 `ppo_legal_formal` 正式运行并写入聚合报告；结果显示 Proposed-RL 在合法候选主设置下仍落后于强启发式基线。
+- 已完成 `ppo_legal_formal` 正式运行并写入聚合报告；结果显示 Proposed-RL 在 full legal action-space 下仍落后于强启发式基线。
+- 已完成 strict proxy + feasible-topk 20k/50k/100k formal run；100k shaping 当前为主结果配置。
+- 已完成 strict proxy + feasible-topk + no-shaping 100k 对照；结果支持把 no-shaping 放入 ablation。
 
-下一步建议回到 `legal` 主设置改进 reward、候选动作表达和 proxy。top-k 结果可作为候选生成消融支持“动作空间剪枝有助于 PPO 学习”的论点，但不能静默替代主方法。
+下一步建议将主方法图表与论文实验口径整理到统一报告中。
 
 ## 7. 主要产物路径
 
@@ -351,3 +398,6 @@ F:\anaconda\envs\leo_semantic\python.exe scripts\18_run_ppo_formal_experiment.py
 | PPO top-k pilot | `outputs/rl/ppo_candidate_topk_pilot/comparison_report.md` |
 | PPO legal formal | `outputs/rl/ppo_legal_formal/comparison_report.md` |
 | PPO top-k formal | `outputs/rl/ppo_topk_formal/comparison_report.md` |
+| PPO strict top-k 100k 主结果 | `outputs/rl/ppo_topk_strict_proxy_shaping_100k/comparison_report.md` |
+| PPO strict top-k 100k no-shaping 对照 | `outputs/rl/ppo_topk_strict_proxy_no_shaping_100k/comparison_report.md` |
+| feasible-topk 主方法说明 | `docs/feasible_topk_main_method.md` |
